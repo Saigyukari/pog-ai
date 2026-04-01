@@ -253,9 +253,19 @@ Usage: `python eval/tournament.py checkpoints/bc/ --include-random --games 200`
 
 **Goal:** Let the user play against the trained AI on their local RTX 5060.
 
-### Task 5.1 — Write `play.py`  ← CURRENT TASK FOR GPT
+### Task 5.1 — Write `play.py`  ✅ DONE
 
-**File to create:** `play.py` (project root)
+Human-vs-AI terminal interface. `python play.py --checkpoint <pkl> --side AP`
+
+---
+
+## Phase 6 — Board Initialization (CRITICAL for meaningful self-play)
+
+**Problem:** Both `jax_env.py` and `pog_env.py` start with empty boards.
+`UNIT_FACTION` is all -1 → ZOC always returns False → no movement actions ever legal.
+Self-play is just card-passing. VP never changes. Training signal is meaningless.
+
+### Task 6.1 — Write `src/data/starting_positions.py`  ← CURRENT TASK FOR GPT
 
 See `claude2gpt.md` for the full spec.
 

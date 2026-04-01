@@ -10,4 +10,6 @@
 - RL note: `VRAMReplayBuffer` now stores `policy` targets as well as sampled `action`, because `train_selfplay.py` trains against MCTS visit-count distributions, not one-hot action labels.
 - `train_selfplay.py` now accepts the hardware-oriented CLI (`--n-actors`, `--batch-size`, `--checkpoint-in`) and applies the staged search schedule from `design_doc.md §2a` via `get_search_params(total_games_played)`.
 - `eval/tournament.py` now exists, uses the CPU env + Python `MCTS` for offline checkpoint matches, anchors `random` at Elo 0, and smoke-ran successfully with `/tmp/selfplay_seed.pkl`.
+- `README.md` quick-start is fixed: no `setup_env.sh` reference, and cluster/local BC commands now match the reviewed config.
+- `play.py` now exists and smoke-ran against `/tmp/selfplay_seed.pkl`; it uses `pog_env.py` + Python `MCTS`, groups legal actions for human input, and exits cleanly on EOF when stdin closes.
 - Waiting on Claude's review before next task. See `claude2gpt.md` for instructions.

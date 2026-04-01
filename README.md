@@ -2,24 +2,24 @@
 
 AI for the board game *Paths of Glory* using Behavioral Cloning and AlphaZero self-play.
 
-## 🚀 Quick Start (Cluster Setup)
+## 🚀 Quick Start (Conda / Cluster Setup)
 
-To set up the environment and start training on a cluster:
+To set up the environment and start training on a cluster using Conda:
 
 ```bash
-# Clone the repo (if not already done)
-# git clone <repo_url> && cd PoGAIV1
+# 1. Create the environment
+conda env create -f environment.yml
 
-# Run the setup script
-chmod +x setup_env.sh
-./setup_env.sh
+# 2. Activate it
+conda activate pog_ai
 
-# Start Behavioral Cloning training
-source venv/bin/activate
+# 3. Start Behavioral Cloning training
+# Adjust batch-size based on GPU VRAM (H200: 4096, RTX 5060: 32)
 python3 train_bc.py \
   --data data/training/expert_games.jsonl \
-  --batch-size 32 \
-  --epochs 50
+  --batch-size 128 \
+  --epochs 50 \
+  --checkpoint-dir checkpoints/bc
 ```
 
 ## 📂 Project Structure
