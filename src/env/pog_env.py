@@ -14,6 +14,7 @@ import json
 import random
 from collections import deque
 from typing import Optional, Dict, List, Tuple
+from src.data.starting_positions import INITIAL_UNIT_LOC, UNIT_FACTION_INIT, UNIT_STRENGTH_INIT, UNIT_TYPE_INIT
 
 try:
     from src.data.pog_engine import (
@@ -125,7 +126,7 @@ class PogEnv:
         self._oos_ap         = np.zeros(n, dtype=bool)
         self._oos_cp         = np.zeros(n, dtype=bool)
         self._fort_destroyed = np.zeros(n, dtype=bool)
-        self._units          = []
+        self._units          = self._build_starting_units()
 
         self._update_oos()
 
@@ -138,6 +139,25 @@ class PogEnv:
         self._cp_deck = self._cp_deck[7:]
 
         return {ag: self.observe(ag) for ag in self.agents}
+
+    def _build_starting_units(self) -> List[dict]:
+        units: List[dict] = []
+        for idx in range(len(INITIAL_UNIT_LOC)):
+            faction = int(UNIT_FACTION_INIT[idx])
+            strength = int(UNIT_STRENGTH_INIT[idx])
+            if idx == 0 or faction < 0 or strength <= 0:
+                continue
+            loc = int(INITIAL_UNIT_LOC[idx])
+            units.append({
+                "unit_id": idx,
+                "faction": faction,
+                "unit_type": int(UNIT_TYPE_INIT[idx]),
+                "strength": strength,
+                "location": loc,
+                "is_eliminated": loc >= N_SPACES,
+                "has_moved": False,
+            })
+        return units
 
     def step(self, action: int) -> Tuple[Dict, Dict, Dict, Dict, Dict]:
         agent = self._agent_name(self.active_player)

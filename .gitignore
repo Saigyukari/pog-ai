@@ -16,3 +16,4 @@ data/training/
 
 # Checkpoints
 checkpoints/
+environment.yml

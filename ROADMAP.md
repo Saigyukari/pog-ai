@@ -265,7 +265,12 @@ Human-vs-AI terminal interface. `python play.py --checkpoint <pkl> --side AP`
 `UNIT_FACTION` is all -1 → ZOC always returns False → no movement actions ever legal.
 Self-play is just card-passing. VP never changes. Training signal is meaningless.
 
-### Task 6.1 — Write `src/data/starting_positions.py`  ← CURRENT TASK FOR GPT
+### Task 6.1 — Write `src/data/starting_positions.py`  ✅ DONE
+
+Piece metadata (faction/type/strength) from data.js + Historical 1914 army positions.
+Both `jax_env.py` and `pog_env.py` patched. `jax_legal_mask` now returns MOVE_UNIT actions.
+
+### Task 6.2 — Fix VP tracking + terminal reward  ← CURRENT TASK FOR GPT
 
 See `claude2gpt.md` for the full spec.
 

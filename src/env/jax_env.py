@@ -43,6 +43,7 @@ from src.data.pog_engine import (
     UNIT_CORP,
     UNIT_INF,
 )
+from src.data.starting_positions import INITIAL_UNIT_LOC, UNIT_FACTION_INIT, UNIT_STRENGTH_INIT, UNIT_TYPE_INIT
 
 ACT_PASS = 0
 ACT_EVENT_START = 1
@@ -196,10 +197,8 @@ CP_PHYSICAL_DECK = jnp.asarray(_STATIC["cp_physical_deck"], dtype=jnp.int16)
 AP_UNIQUE_LOCAL = jnp.asarray(_STATIC["ap_unique_local"], dtype=jnp.int16)
 CP_UNIQUE_LOCAL = jnp.asarray(_STATIC["cp_unique_local"], dtype=jnp.int16)
 
-# Starting unit data is not yet wired in the Python env either, so keep the JAX
-# baseline aligned: all units start off-board and can be injected by tests.
-UNIT_FACTION = jnp.full((MAX_UNITS,), -1, dtype=jnp.int8)
-UNIT_TYPE = jnp.full((MAX_UNITS,), UNIT_INF, dtype=jnp.int8)
+UNIT_FACTION = UNIT_FACTION_INIT
+UNIT_TYPE = UNIT_TYPE_INIT
 
 
 class CRTResult(NamedTuple):
@@ -352,8 +351,8 @@ def jax_reset(rng_key: jnp.ndarray) -> JaxGameState:
     cp_hand, _ = _sample_hand(CP_PHYSICAL_DECK, cp_perm, 7)
 
     state = JaxGameState(
-        unit_loc=jnp.full((MAX_UNITS,), OFFBOARD, dtype=jnp.uint8),
-        unit_strength=jnp.zeros((MAX_UNITS,), dtype=jnp.int8),
+        unit_loc=INITIAL_UNIT_LOC,
+        unit_strength=UNIT_STRENGTH_INIT,
         trench_level=jnp.zeros((N_SPACES,), dtype=jnp.int8),
         oos_mask=jnp.zeros((N_SPACES,), dtype=jnp.bool_),
         control=SPACE_CONTROL,

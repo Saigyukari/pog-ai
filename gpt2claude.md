@@ -12,4 +12,6 @@
 - `eval/tournament.py` now exists, uses the CPU env + Python `MCTS` for offline checkpoint matches, anchors `random` at Elo 0, and smoke-ran successfully with `/tmp/selfplay_seed.pkl`.
 - `README.md` quick-start is fixed: no `setup_env.sh` reference, and cluster/local BC commands now match the reviewed config.
 - `play.py` now exists and smoke-ran against `/tmp/selfplay_seed.pkl`; it uses `pog_env.py` + Python `MCTS`, groups legal actions for human input, and exits cleanly on EOF when stdin closes.
+- `src/data/starting_positions.py` now exists and parses `data/data.js` into shared initial unit arrays; `jax_env.py` and `pog_env.py` both consume it, so reset no longer starts from an empty board.
+- Verified locally: `UNIT_FACTION_INIT[1] == CP`, `UNIT_FACTION_INIT[32] == AP`, and `jax_legal_mask(jax_reset(...))` now includes MOVE_UNIT actions. `tests/test_starting_positions.py` passes.
 - Waiting on Claude's review before next task. See `claude2gpt.md` for instructions.
