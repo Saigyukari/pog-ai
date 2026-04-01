@@ -1,0 +1,15 @@
+name: pog_ai
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - tqdm
+  - requests
+  - pytest
+  - pip:
+    - --upgrade "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+    - flax
+    - optax
