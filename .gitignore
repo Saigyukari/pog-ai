@@ -7,3 +7,12 @@ dist/
 build/
 .env
 *.Zone.Identifier
+
+# Raw RTT game exports (large, not versioned)
+data/rtt_games/
+
+# Generated training data (large, reproducible)
+data/training/
+
+# Checkpoints
+checkpoints/

@@ -191,7 +191,6 @@ def _policy_loss(policy_heads: Tuple, action_taken: jnp.ndarray) -> jnp.ndarray:
     ) / 4.0
 
 
-@jax.jit
 def bc_loss_phase1(params, batch, model, adj):
     """Phase 1: policy cross-entropy only (value head ignored)."""
     spatial_obs, card_context, legal_mask, action_taken, outcome = batch
@@ -199,7 +198,6 @@ def bc_loss_phase1(params, batch, model, adj):
     return _policy_loss(policy_heads, action_taken)
 
 
-@jax.jit
 def bc_loss_phase2(params, batch, model, adj, lambda_v: float = 0.1):
     """Phase 2: policy + λ_v × MSE(value, discounted outcome)."""
     spatial_obs, card_context, legal_mask, action_taken, outcome = batch
@@ -209,10 +207,39 @@ def bc_loss_phase2(params, batch, model, adj, lambda_v: float = 0.1):
     return policy_l + lambda_v * value_l
 
 
-@jax.jit
 def bc_loss_phase3(params, batch, model, adj, lambda_v: float = 1.0):
     """Phase 3: full targets — same as Phase 2 but λ_v=1.0 for MCTS integration."""
     return bc_loss_phase2(params, batch, model, adj, lambda_v=lambda_v)
+
+
+def batch_component_accuracy(params, batch, model, adj) -> float:
+    """
+    Mean per-component accuracy for the factored policy heads.
+    This is a smoke-test metric, not a true flat-action Top-1 score.
+    """
+    spatial_obs, card_context, legal_mask, action_taken, outcome = batch
+    (card_logits, atype_logits, src_logits, tgt_logits), _ = model.apply(
+        params, spatial_obs, card_context, adj)
+
+    pred_card  = np.array(jnp.argmax(card_logits, axis=-1), dtype=np.int32)
+    pred_atype = np.array(jnp.argmax(atype_logits, axis=-1), dtype=np.int32)
+    pred_src   = np.array(jnp.argmax(src_logits, axis=-1), dtype=np.int32)
+    pred_tgt   = np.array(jnp.argmax(tgt_logits, axis=-1), dtype=np.int32)
+
+    truth = np.array(action_taken, dtype=np.int32)
+    card_tgt  = np.where(
+        truth == 0, 0,
+        np.where(truth < 111, truth - 1, np.where(truth < 441, (truth - 111) // 3, 0))
+    )
+    atype_tgt = np.where(truth == 0, 0, np.where(truth < 111, 0, np.where(truth < 441, (truth - 111) % 3, 3)))
+    src_tgt   = np.where(truth >= 441, (truth - 441) // N_SPACES, 0)
+    tgt_tgt   = np.where(truth >= 441, (truth - 441) % N_SPACES, 0)
+
+    card_acc  = np.mean(pred_card == card_tgt)
+    atype_acc = np.mean(pred_atype == np.clip(atype_tgt, 0, 2))
+    src_acc   = np.mean(pred_src == src_tgt)
+    tgt_acc   = np.mean(pred_tgt == tgt_tgt)
+    return float(np.mean([card_acc, atype_acc, src_acc, tgt_acc]))
 
 
 # ─────────────────────────────────────────────
@@ -258,17 +285,23 @@ def train_bc(
 
     @jax.jit
     def step_p1(st, b):
-        loss, grads = jax.value_and_grad(bc_loss_phase1)(st.params, b, model, adj)
+        def loss_fn(params):
+            return bc_loss_phase1(params, b, model, adj)
+        loss, grads = jax.value_and_grad(loss_fn)(st.params)
         return st.apply_gradients(grads=grads), loss
 
     @jax.jit
     def step_p2(st, b):
-        loss, grads = jax.value_and_grad(bc_loss_phase2)(st.params, b, model, adj)
+        def loss_fn(params):
+            return bc_loss_phase2(params, b, model, adj)
+        loss, grads = jax.value_and_grad(loss_fn)(st.params)
         return st.apply_gradients(grads=grads), loss
 
     @jax.jit
     def step_p3(st, b):
-        loss, grads = jax.value_and_grad(bc_loss_phase3)(st.params, b, model, adj)
+        def loss_fn(params):
+            return bc_loss_phase3(params, b, model, adj)
+        loss, grads = jax.value_and_grad(loss_fn)(st.params)
         return st.apply_gradients(grads=grads), loss
 
     for epoch in range(1, n_epochs + 1):
@@ -280,19 +313,27 @@ def train_bc(
             phase, step_fn = 3, step_p3
 
         losses = []
+        accs   = []
         for batch in make_bc_batches(train_records, batch_size=batch_size):
             state, loss = step_fn(state, batch)
             losses.append(float(loss))
+            accs.append(batch_component_accuracy(state.params, batch, model, adj))
 
         val_str = ""
         if val_records and losses:
             val_losses = []
+            val_accs   = []
             for batch in make_bc_batches(val_records, batch_size=batch_size, shuffle=False):
                 val_losses.append(float(bc_loss_phase2(state.params, batch, model, adj)))
-            val_str = f"  val_loss={np.mean(val_losses):.4f}"
+                val_accs.append(batch_component_accuracy(state.params, batch, model, adj))
+            val_str = (
+                f"  val_loss={np.mean(val_losses):.4f}"
+                f"  val_component_acc={np.mean(val_accs):.3f}"
+            )
 
         if losses:
             print(f"Epoch {epoch:3d} [Phase {phase}]  "
-                  f"train_loss={np.mean(losses):.4f}{val_str}")
+                  f"train_loss={np.mean(losses):.4f}"
+                  f"  train_component_acc={np.mean(accs):.3f}{val_str}")
 
     return state.params
