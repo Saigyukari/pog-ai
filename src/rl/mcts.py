@@ -5,7 +5,7 @@ Design constraints:
   - ALL arrays pre-allocated at startup (static shapes for jit)
   - Simulation loop uses jax.lax.fori_loop (no Python-level loop under jit)
   - Env stepping uses jax.pure_callback (Python env stays outside jit scope)
-  - Tree capacity: MAX_NODES = 4096 nodes per search
+  - Tree capacity: MAX_NODES = 512 nodes per search
 
 Tree arrays (all shape [MAX_NODES, ...]):
   N  [MAX_NODES, N_ACTIONS]  int32   visit counts
@@ -22,7 +22,7 @@ import numpy as np
 from typing import NamedTuple, Callable, Optional
 
 N_ACTIONS = 5341
-MAX_NODES = 4096
+MAX_NODES = 512
 C_PUCT    = 1.5      # exploration constant
 
 
@@ -102,6 +102,7 @@ class MCTS:
 
     def __init__(self, model, params, adj: jnp.ndarray,
                  n_simulations: int = 400,
+                 depth_limit: int = 4,
                  dirichlet_alpha: float = 0.3,
                  dirichlet_eps:   float = 0.25,
                  temperature:     float = 1.0):
@@ -109,6 +110,7 @@ class MCTS:
         self.params          = params
         self.adj             = adj
         self.n_simulations   = n_simulations
+        self.depth_limit     = depth_limit
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_eps   = dirichlet_eps
         self.temperature     = temperature
@@ -149,7 +151,7 @@ class MCTS:
         tgt_probs = np.array(jax.nn.softmax(tgt_l[0]))
         for si in range(src_probs.shape[0]):
             for ti in range(tgt_probs.shape[0]):
-                flat = 441 + si * N_ACTIONS + ti  # NOTE: uses env N_SPACES
+                flat = 441 + si * src_probs.shape[0] + ti
                 if flat < N_ACTIONS:
                     prior[flat] = src_probs[si] * tgt_probs[ti]
 
@@ -192,10 +194,13 @@ class MCTS:
         for sim in range(self.n_simulations):
             sim_env   = copy.deepcopy(env)
             node      = 0
+            depth     = 0
             path: list = []   # [(node, action)]
 
             # ── Selection ─────────────────────────────────────────
             while True:
+                if depth >= self.depth_limit:
+                    break
                 legal = sim_env.action_mask(sim_env._agent_name(sim_env.active_player))
                 scores = np.array(ucb_scores(self.tree, node, jnp.array(legal)))
                 action = int(np.argmax(scores))
@@ -209,6 +214,7 @@ class MCTS:
                 node = child
                 try:
                     _, _, done, _, _ = sim_env.step(action)
+                    depth += 1
                     if any(done.values()):
                         break
                 except Exception:

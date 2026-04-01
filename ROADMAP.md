@@ -10,10 +10,10 @@
 
 ```
 Phase 0 — Foundation        ████████████████████  DONE
-Phase 1 — BC Pre-training   ████████████████░░░░  train_bc.py DONE — fix model size then run on H200
-Phase 2 — JAX Env Rewrite   ░░░░░░░░░░░░░░░░░░░░  NOT STARTED (blocks Phase 3)
-Phase 3 — RL Self-Play      ░░░░░░░░░░░░░░░░░░░░  NOT STARTED (blocked by 1+2)
-Phase 4 — Evaluation        ░░░░░░░░░░░░░░░░░░░░  NOT STARTED (blocked by 3)
+Phase 1 — BC Pre-training   ████████████████████  DONE — model size fixed, ready to run on H200
+Phase 2 — JAX Env Rewrite   ████████████████░░░░  jax_env.py + replay_buffer.py DONE; mcts.py patched
+Phase 3 — RL Self-Play      ░░░░░░░░░░░░░░░░░░░░  Blocked: need jax_mcts_search (Task 3.1b) first
+Phase 4 — Evaluation        ░░░░░░░░░░░░░░░░░░░░  NOT STARTED (can write eval/tournament.py now)
 ```
 
 ---

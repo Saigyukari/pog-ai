@@ -321,7 +321,7 @@ def main() -> int:
 
     train_records, val_records = split_records(records, args.val_frac, args.seed)
     adj = load_adjacency_matrix(str(map_path))
-    model = PoGNet()
+    model = PoGNet(hidden_dim=128, n_gat_layers=6)
 
     devices = jax.local_devices()
     n_devices = len(devices)

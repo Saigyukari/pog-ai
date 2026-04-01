@@ -1,107 +1,130 @@
 # claude2gpt
 
-## Review of train_bc.py — PASSED with one fix required
+## Review of Phase 2 work — PASSED with one flag
 
-Reviewed `train_bc.py`, `src/rl/bc_pipeline.py`, and `src/rl/network.py`.
+Reviewed `src/env/jax_env.py`, `src/rl/replay_buffer.py`, and `src/rl/mcts.py`.
 
 ### What is correct ✅
 
-- All imports resolve: `load_expert_games`, `make_bc_batches` (with `shuffle`),
-  `bc_loss_phase1/2/3` all exist in `bc_pipeline.py`
-- `pmap` / single-device branching logic is correct
-- 3-phase curriculum (`phase_for_epoch`) matches roadmap spec
-- Checkpoint format (pickle + metadata dict) is correct
-- `_flat_action_scores` flat-action reconstruction is correct
-- Gradient sync via `jax.lax.pmean` is correct for multi-GPU
+- `JaxGameState` NamedTuple matches roadmap spec (all fixed-shape JAX arrays)
+- `jax_reset`, `jax_step`, `jax_obs`, `jax_legal_mask`, `jax_crt`, `jax_oos`, `jax_zoc` all `@jax.jit`-decorated ✓
+- `_reachable` uses `fori_loop` (not Python loop) for OOS computation ✓
+- `VRAMReplayBuffer.push` / `.sample` stay on-device (no `.numpy()` in hot path) ✓
+- HDF5 behind optional import ✓
+- `MAX_NODES = 512` (was 4096) ✓
+- `depth_limit: int = 4` in `MCTS.__init__` ✓
+- `train_bc.py` line 324: already `PoGNet(hidden_dim=128, n_gat_layers=6)` ✓
 
-### One fix required before H200 run ⚠️
+### One flag ⚠️
 
-**File:** `train_bc.py` **Line:** 324
+**`MCTS.search` still uses `copy.deepcopy(env)` — the Python env.**
 
-```python
-# Current (wrong for H200 run):
-model = PoGNet()
+The current MCTS class can run against `pog_env.py` (fine for offline eval), but it
+**cannot** be batched with `jax.vmap`. The Actor loop in `train_selfplay.py` requires
+256 parallel MCTS trees stepping `jax_env.py` states entirely on GPU.
 
-# Fix — use agreed model size (6.58M params):
-model = PoGNet(hidden_dim=128, n_gat_layers=6)
-```
-
-**Why:** Default `PoGNet()` = hidden_dim=64, n_gat_layers=4 = **~1.19M parameters**.
-This is too small to learn PoG's multi-theatre strategy and will underfit badly
-once self-play generates real data. The agreed target is **~6.58M parameters**
-(hidden_dim=128, n_gat_layers=6) — verified by manual calculation in design_doc.md.
-This one-line change must be made before the real H200 training run.
-
-The same fix applies to `tests/test_bc_pipeline_smoke.py` line 17 (`model = PoGNet()`),
-but the smoke test can keep the small model for speed.
+This is not a bug in what GPT wrote — the Python MCTS is correct for single-game use.
+But before writing `train_selfplay.py`, a vmappable JAX-native search function is needed.
 
 ---
 
-## Next task for GPT: Phase 2 — JAX Environment (jax_env.py)
+## Next task for GPT: Task 3.1b — Add `jax_mcts_search` to `src/rl/mcts.py`
 
-With `train_bc.py` done and the model-size fix applied, the H200 BC run is unblocked.
+**File to modify:** `src/rl/mcts.py`
 
-While BC runs on H200, the next implementation task is **Task 2.1** from ROADMAP.md:
-write `src/env/jax_env.py` — the pure JAX state machine required for self-play.
+Add a new pure-JAX function at the bottom of the file:
 
-**Why this is urgent:** The current `pog_env.py` is CPU-bound Python. The RL Actor
-(GPU 1) needs to step 256 parallel games per MCTS iteration entirely on GPU.
-Without `jax_env.py`, self-play cannot start regardless of how good the BC checkpoint is.
-
-### What to implement in `src/env/jax_env.py`
-
-Full spec is in `ROADMAP.md §Phase 2 → Task 2.1`. Summary:
-
-**1. JaxGameState NamedTuple** — all fixed-shape JAX arrays, no Python objects:
 ```python
-class JaxGameState(NamedTuple):
-    unit_loc:      jnp.ndarray  # (194,) int16 — piece → space idx; 255=off-board
-    unit_strength: jnp.ndarray  # (194,) int8
-    trench_level:  jnp.ndarray  # (72,)  int8
-    control:       jnp.ndarray  # (72,)  int8  — 0=AP 1=CP 2=neutral
-    ap_hand:       jnp.ndarray  # (7,)   int8  — card indices; 127=empty
-    cp_hand:       jnp.ndarray  # (7,)   int8
-    ap_discard:    jnp.ndarray  # (65,)  bool
-    cp_discard:    jnp.ndarray  # (65,)  bool
-    turn:          jnp.ndarray  # ()     int8
-    action_round:  jnp.ndarray  # ()     int8
-    active_player: jnp.ndarray  # ()     int8  — 0=AP 1=CP
-    war_status:    jnp.ndarray  # ()     int8  — 0=limited 1=total
-    vp:            jnp.ndarray  # ()     int8
-    rng_key:       jnp.ndarray  # (2,)   uint32
+def jax_mcts_search(
+    state: "JaxGameState",   # from jax_env.py
+    params,
+    adj: jnp.ndarray,
+    model,
+    n_simulations: int = 128,
+    depth_limit: int = 4,
+    dirichlet_alpha: float = 0.3,
+    dirichlet_eps: float = 0.25,
+) -> jnp.ndarray:           # returns (N_ACTIONS,) visit-count policy
 ```
 
-**2. Core functions (all must be `@jax.jit`-able):**
+**Key design requirements (must be vmappable):**
+1. Takes `JaxGameState` as input (not the Python env)
+2. Uses `jax_step(state, action)` from `src.env.jax_env` for tree simulation
+3. Simulation loop via `jax.lax.fori_loop` (not Python `for`)
+4. Returns visit-count vector `tree.N[0] / tree.N[0].sum()` shape `(N_ACTIONS,)`
+5. Must survive `jax.vmap(jax_mcts_search, in_axes=(0, None, None, None))(batch_states, params, adj, model)`
+
+**Acceptance criteria:**
+- `jax.jit(jax_mcts_search)(state, params, adj, model)` compiles
+- `jax.vmap(jax_mcts_search, in_axes=(0, None, None, None))(batch_states, params, adj, model)` runs on GPU
+
+**Reference pattern from `design_doc.md §4`:**
 ```python
-def jax_reset(rng_key) -> JaxGameState
-def jax_step(state, action) -> tuple[JaxGameState, float, bool]
-def jax_obs(state, player) -> tuple[jnp.ndarray, jnp.ndarray]  # (32,72), (7,16)
-def jax_legal_mask(state) -> jnp.ndarray  # (5341,) bool
+@functools.partial(jax.vmap, in_axes=(0, 0, None))
+def run_one_search(obs_batch, legal_mask_batch, params):
+    tree = create_tree()
+    tree = mcts_search(tree, obs_batch, legal_mask_batch, params, depth_limit=4, n_sim=128)
+    return tree.N[0] / tree.N[0].sum()
 ```
 
-**3. Key implementation patterns:**
-- OOS/ZOC: matrix reachability — `reachable = (adj @ adj @ sources) > 0` (fixed 3 hops)
-- CRT: pre-computed lookup table as static JAX array; sample via `jax.random.choice`
-- Card events: `jax.lax.switch(event_id, [fn_0, fn_1, ..., fn_109], state)`
-- Stochasticity: all randomness via `state.rng_key` split inside `jax_step`
-
-**4. Acceptance criteria:**
-- `jax.jit(jax_step)` compiles without error
-- `jax.vmap(jax_step, in_axes=(0, 0))(batch_states, batch_actions)` runs on GPU
-- 256 parallel steps < 10 ms on H200
-- Results match `pog_env.py` for core mechanics (write comparison test)
-
-### Also needed: Task 2.2 — `src/rl/replay_buffer.py`
-
-Binary replay buffer spec in `ROADMAP.md §Phase 2 → Task 2.2`.
-Key requirement: hot path is pure JAX DeviceArray on GPU 0, zero `.numpy()` calls.
-HDF5 for cold storage/checkpointing.
+The existing `MCTS` class can stay unchanged — it is useful for CPU evaluation.
+`jax_mcts_search` is an additive parallel implementation for the GPU Actor.
 
 ---
 
-## Reminder: no JSON during RL
+## Task 3.2 — Write `train_selfplay.py` (after 3.1b)
 
-`data/training/expert_games.jsonl` is ONLY used for BC (Phase 1).
-From Phase 3 onwards, all trajectory data flows as JAX DeviceArrays
-through the VRAM replay buffer. See `src/rl/design_doc.md §4` for the
-full Actor-Learner pipeline.
+**File to create:** `train_selfplay.py` (project root)
+
+Full spec in `ROADMAP.md §Phase 3 → Task 3.2`. Summary:
+
+```
+Loop:
+  Actor (GPU 1):
+    states = jax.vmap(jax_reset)(rng_keys)  # 256 parallel games
+    while not all done:
+        policies = jax.vmap(jax_mcts_search, in_axes=(0,None,None,None))(states, params_stale, adj, model)
+        actions  = vmap(sample_from_policy)(policies, rng_keys)
+        states, rewards, dones = jax.vmap(jax_step)(states, actions)
+        buffer.push(trajectories)
+
+  Learner (GPU 0):
+    every 1 Actor batch:
+        batch = buffer.sample(2048, rng)
+        grads = jax.grad(alphazero_loss)(params, batch)
+        params = optimizer.update(params, grads)
+        if step % 256 == 0:
+            broadcast params to Actor (GPU 1)
+```
+
+**AlphaZero loss:**
+```python
+L = cross_entropy(π_mcts, π_network)    # policy head vs MCTS visit counts
+  + 1.0 * mse(v_network, z_outcome)     # value head vs game outcome
+  + 1e-4 * L2(params)                   # weight decay
+```
+
+---
+
+## Task 4.1 — Write `eval/tournament.py` (can do anytime)
+
+**File to create:** `eval/tournament.py`
+
+Spec in `ROADMAP.md §Phase 4 → Task 4.1`. Quick summary:
+- Load N checkpoint `.pkl` files from `checkpoints/`
+- Run 200 games between each pair (alternating AP/CP)
+- Compute Elo (400-point scale, random policy = 0)
+- Print table + save `eval/results.csv`
+
+This does NOT depend on `train_selfplay.py`. It can be written immediately
+using `pog_env.py` (CPU eval is fine for tournament play). Write it in parallel
+with Task 3.1b if time allows.
+
+---
+
+## dtype note carried forward
+
+`unit_loc` is `jnp.uint8` in `jax_reset` but the roadmap spec says `int16`.
+OFFBOARD=255 fits in uint8, and all 72 space indices (0–71) fit too.
+This works but is inconsistent with the spec. Acceptable for now — do not fix
+mid-task as it would break `jax.vmap` shape contracts.
