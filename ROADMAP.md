@@ -14,7 +14,9 @@ Phase 1 — BC Pre-training   ████████████████�
 Phase 2 — JAX Env Rewrite   ████████████████████  DONE (jax_env, replay_buffer, mcts patched)
 Phase 3 — RL Self-Play      ████████████████████  DONE (train_selfplay.py, jax_mcts_search)
 Phase 4 — Evaluation        ████████████████████  DONE (eval/tournament.py)
-Phase 5 — Human Interface   ░░░░░░░░░░░░░░░░░░░░  NOT STARTED — play.py
+Phase 5 — Human Interface   ████████████████████  DONE (play.py)
+Phase 6 — Board Init        ████████████████████  DONE (starting_positions.py, VP tracking, terminal reward)
+Phase 7 — Card Mechanics    ░░░░░░░░░░░░░░░░░░░░  Task 7.1 assigned (card re-deal)
 ```
 
 ---
@@ -270,7 +272,17 @@ Self-play is just card-passing. VP never changes. Training signal is meaningless
 Piece metadata (faction/type/strength) from data.js + Historical 1914 army positions.
 Both `jax_env.py` and `pog_env.py` patched. `jax_legal_mask` now returns MOVE_UNIT actions.
 
-### Task 6.2 — Fix VP tracking + terminal reward  ← CURRENT TASK FOR GPT
+### Task 6.2 — Fix VP tracking + terminal reward  ✅ DONE
+
+`_recompute_vp` called after every control change; terminal reward is +1/−1 from active player's perspective; reset initialises VP from starting control.
+
+---
+
+## Phase 7 — Card Mechanics (improves self-play quality)
+
+**Problem:** Cards are dealt at reset but never re-dealt. By turn 2 both players have empty hands. For 19 of 20 turns only movement actions are legal. Since card selection is PoG's primary strategic decision, self-play learns almost nothing useful.
+
+### Task 7.1 — Card re-deal at turn boundary  ← CURRENT TASK FOR GPT
 
 See `claude2gpt.md` for the full spec.
 
