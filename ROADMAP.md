@@ -10,10 +10,11 @@
 
 ```
 Phase 0 — Foundation        ████████████████████  DONE
-Phase 1 — BC Pre-training   ████████████████████  DONE — model size fixed, ready to run on H200
-Phase 2 — JAX Env Rewrite   ████████████████░░░░  jax_env.py + replay_buffer.py DONE; mcts.py patched
-Phase 3 — RL Self-Play      ░░░░░░░░░░░░░░░░░░░░  Blocked: need jax_mcts_search (Task 3.1b) first
-Phase 4 — Evaluation        ░░░░░░░░░░░░░░░░░░░░  NOT STARTED (can write eval/tournament.py now)
+Phase 1 — BC Pre-training   ████████████████████  DONE — running on cluster now
+Phase 2 — JAX Env Rewrite   ████████████████████  DONE (jax_env, replay_buffer, mcts patched)
+Phase 3 — RL Self-Play      ████████████████████  DONE (train_selfplay.py, jax_mcts_search)
+Phase 4 — Evaluation        ████████████████████  DONE (eval/tournament.py)
+Phase 5 — Human Interface   ░░░░░░░░░░░░░░░░░░░░  NOT STARTED — play.py
 ```
 
 ---
@@ -183,17 +184,11 @@ class VRAMReplayBuffer:
 - GPU 1: Actor — 256-way `jax.vmap` parallel MCTS, depth 3–5, no rollouts
 - No JSON anywhere in this phase
 
-### Task 3.1 — Patch `src/rl/mcts.py`
+### Task 3.1 — Patch `src/rl/mcts.py`  ✅ DONE
 
-Two changes needed to existing file:
+MAX_NODES=512, depth_limit=4, jax_mcts_search() added (pure JAX, vmappable).
 
-1. Reduce `MAX_NODES = 4096` → `MAX_NODES = 512`
-   (truncated depth=4 search uses far fewer nodes; saves ~85% of Actor VRAM)
-
-2. Add `depth_limit: int = 4` parameter to search loop
-   (currently the search runs until tree is full; must hard-stop at depth and call value head)
-
-### Task 3.2 — Write `train_selfplay.py`
+### Task 3.2 — Write `train_selfplay.py`  ✅ DONE
 
 **File to create:** `train_selfplay.py` (project root)
 
@@ -236,13 +231,11 @@ L = cross_entropy(π_mcts, π_network)    # policy head matches MCTS visit count
 
 **Goal:** Track Elo, detect regressions, compare checkpoints.
 
-### Task 4.1 — Write `eval/tournament.py`
+### Task 4.1 — Write `eval/tournament.py`  ✅ DONE
 
-**What it must do:**
-1. Load two or more checkpoint files from `checkpoints/`
-2. Run N=200 games between each pair (alternating AP/CP sides)
-3. Compute Elo with 400-point scale, anchored: random policy = 0
-4. Print results table, save to `eval/results.csv`
+Round-robin, alternating sides, Elo 400-scale anchored at random=0, CSV output.
+
+Usage: `python eval/tournament.py checkpoints/bc/ --include-random --games 200`
 
 **Milestones to target:**
 
@@ -253,6 +246,18 @@ L = cross_entropy(π_mcts, π_network)    # policy head matches MCTS visit count
 | +400 | Beginner human equivalent |
 | +700 | Club-level human equivalent |
 | +1000 | Expert-level (stretch goal) |
+
+---
+
+## Phase 5 — Human Interface
+
+**Goal:** Let the user play against the trained AI on their local RTX 5060.
+
+### Task 5.1 — Write `play.py`  ← CURRENT TASK FOR GPT
+
+**File to create:** `play.py` (project root)
+
+See `claude2gpt.md` for the full spec.
 
 ---
 

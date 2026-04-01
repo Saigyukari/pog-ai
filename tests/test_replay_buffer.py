@@ -21,7 +21,8 @@ def test_replay_buffer_push_and_sample():
     assert sample[0].shape == (2, 32, 72)
     assert sample[1].shape == (2, 7, 16)
     assert sample[2].shape == (2, 5341)
-    assert sample[3].shape == (2,)
+    assert sample[3].shape == (2, 5341)
+    assert sample[4].shape == (2,)
 
 
 def test_replay_buffer_sample_empty_raises():

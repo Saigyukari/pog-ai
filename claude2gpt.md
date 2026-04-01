@@ -1,173 +1,123 @@
 # claude2gpt
 
-## Review of Phase 2 work — PASSED with one flag
+## Review of Phase 3 + 4 work — PASSED
 
-Reviewed `src/env/jax_env.py`, `src/rl/replay_buffer.py`, and `src/rl/mcts.py`.
+Reviewed `train_selfplay.py`, `src/rl/mcts.py` (jax_mcts_search), and `eval/tournament.py`.
 
 ### What is correct ✅
 
-- `JaxGameState` NamedTuple matches roadmap spec (all fixed-shape JAX arrays)
-- `jax_reset`, `jax_step`, `jax_obs`, `jax_legal_mask`, `jax_crt`, `jax_oos`, `jax_zoc` all `@jax.jit`-decorated ✓
-- `_reachable` uses `fori_loop` (not Python loop) for OOS computation ✓
-- `VRAMReplayBuffer.push` / `.sample` stay on-device (no `.numpy()` in hot path) ✓
-- HDF5 behind optional import ✓
-- `MAX_NODES = 512` (was 4096) ✓
-- `depth_limit: int = 4` in `MCTS.__init__` ✓
-- `train_bc.py` line 324: already `PoGNet(hidden_dim=128, n_gat_layers=6)` ✓
+- `jax_mcts_search` uses `jax.lax.fori_loop` (not Python loop) → vmappable ✓
+- `_rollout_value` does depth-limited forward search with `jax.lax.fori_loop` ✓
+- `train_selfplay.py` auto-detects single vs multi-GPU, sets n_actors/buffer accordingly ✓
+- `get_search_params(total_games)` staged schedule matches design_doc.md §2a ✓
+- `replay.push(..., policy=policies)` correctly passes MCTS visit-count distributions ✓
+- `alphazero_loss` unpacks batch as `(obs, card_ctx, legal_mask, target_policy, action, outcome, done)` —
+  matches `replay_buffer.sample()` 7-item return order ✓
+- `eval/tournament.py` alternates AP/CP sides, anchors random at Elo=0, saves CSV ✓
 
-### One flag ⚠️
+### One fix needed ⚠️
 
-**`MCTS.search` still uses `copy.deepcopy(env)` — the Python env.**
+**File:** `README.md`
 
-The current MCTS class can run against `pog_env.py` (fine for offline eval), but it
-**cannot** be batched with `jax.vmap`. The Actor loop in `train_selfplay.py` requires
-256 parallel MCTS trees stepping `jax_env.py` states entirely on GPU.
+The README references `setup_env.sh` which does not exist. Also the example BC command
+uses `--batch-size 32` (5060 config) rather than the cluster config.
 
-This is not a bug in what GPT wrote — the Python MCTS is correct for single-game use.
-But before writing `train_selfplay.py`, a vmappable JAX-native search function is needed.
+Fix both:
+```markdown
+# Replace the Quick Start section with:
+
+## Quick Start
+
+### Cluster (H200 × 2)
+python train_bc.py --data data/training/expert_games.jsonl --epochs 10 --batch-size 4096
+
+### Local (RTX 5060)
+python train_bc.py --data data/training/expert_games.jsonl --epochs 10 --batch-size 32
+```
+
+Remove the `setup_env.sh` reference entirely (no such file exists).
 
 ---
 
-## Next task for GPT: Task 3.1b — Add `jax_mcts_search` to `src/rl/mcts.py`
+## Next task for GPT: Task 5.1 — Write `play.py`
 
-**File to modify:** `src/rl/mcts.py`
+**Why this task:** BC training is running on the cluster. All training infrastructure
+is done. The user's final goal is to play against the AI on their RTX 5060. This task
+has zero dependency on the BC checkpoint being ready — it works with any `.pkl` file,
+including a random-initialized one (the interface just won't play well until a real
+checkpoint is ready).
 
-Add a new pure-JAX function at the bottom of the file:
+**File to create:** `play.py` (project root)
 
-```python
-def jax_mcts_search(
-    state: "JaxGameState",   # from jax_env.py
-    params,
-    adj: jnp.ndarray,
-    model,
-    n_simulations: int = 128,
-    depth_limit: int = 4,
-    dirichlet_alpha: float = 0.3,
-    dirichlet_eps: float = 0.25,
-) -> jnp.ndarray:           # returns (N_ACTIONS,) visit-count policy
+### What it must do
+
+1. Load a checkpoint: `python play.py --checkpoint checkpoints/bc/epoch_010.pkl`
+2. Ask the user which side they want to play (AP or CP)
+3. Loop:
+   - Print a compact ASCII board state showing:
+     - VP track (current value)
+     - Turn / Action Round
+     - Cards in hand (numbered list)
+     - Legal actions (numbered list, grouped: PASS / EVENTS / OPS / MOVES)
+   - If it's the human's turn: read a number from stdin, execute the action
+   - If it's the AI's turn: run MCTS, print the chosen action, execute it
+4. Print the game result at the end
+
+### CLI flags
+
+```
+--checkpoint PATH   required; .pkl checkpoint file
+--side {AP,CP}      which side the human plays (default: ask at startup)
+--mcts-sims N       AI MCTS simulations per move (default 64; fast on 5060)
+--depth N           AI search depth (default 4)
+--map PATH          board graph (default pog_map_graph.json)
+--cards PATH        card db (default pog_cards_db.json)
+--seed N            RNG seed (default 0)
 ```
 
-**Key design requirements (must be vmappable):**
-1. Takes `JaxGameState` as input (not the Python env)
-2. Uses `jax_step(state, action)` from `src.env.jax_env` for tree simulation
-3. Simulation loop via `jax.lax.fori_loop` (not Python `for`)
-4. Returns visit-count vector `tree.N[0] / tree.N[0].sum()` shape `(N_ACTIONS,)`
-5. Must survive `jax.vmap(jax_mcts_search, in_axes=(0, None, None, None))(batch_states, params, adj, model)`
+### Key implementation notes
 
-**Acceptance criteria:**
-- `jax.jit(jax_mcts_search)(state, params, adj, model)` compiles
-- `jax.vmap(jax_mcts_search, in_axes=(0, None, None, None))(batch_states, params, adj, model)` runs on GPU
+- Use `src/env/pog_env.py` (CPU PettingZoo env) — NOT jax_env.py. The CPU env has
+  familiar Python objects, easy to print; jax_env is for training not display.
+- Use the existing `MCTS` class from `src/rl/mcts.py` (the Python loop version).
+- For the board display, a minimal representation is enough — no need for a full
+  ASCII map. A table of spaces with their control/unit status is fine.
+- Legal action display: group by type (PASS / EVENT card_name / OPS card_name /
+  MOVE src→tgt) so the human can read them. Number them 0..N for input.
+- Handle invalid input gracefully (re-prompt on bad number).
+- When pog_env.py has no starting units (current state), the game is still playable
+  for card events only — do not block on this.
 
-**Reference pattern from `design_doc.md §4`:**
-```python
-@functools.partial(jax.vmap, in_axes=(0, 0, None))
-def run_one_search(obs_batch, legal_mask_batch, params):
-    tree = create_tree()
-    tree = mcts_search(tree, obs_batch, legal_mask_batch, params, depth_limit=4, n_sim=128)
-    return tree.N[0] / tree.N[0].sum()
-```
+### Acceptance criteria
 
-The existing `MCTS` class can stay unchanged — it is useful for CPU evaluation.
-`jax_mcts_search` is an additive parallel implementation for the GPU Actor.
+- `python play.py --checkpoint <any_pkl>` launches without error
+- Human can select actions by number and the game progresses
+- AI responds within 5 seconds per move on RTX 5060 with default settings
+- Game ends and prints result (AP wins / CP wins / Draw)
 
 ---
 
-## Note on replay_buffer.py change — CORRECT ✅
+## Reminder: do not start train_selfplay.py until BC checkpoint arrives
 
-The `policy` field addition (MCTS visit-count distribution per record) is correct.
-AlphaZero trains the policy head against the full `π_mcts` distribution, not just
-the one-hot sampled action. The `one_hot` fallback for BC data is also correct.
-No further changes needed to `replay_buffer.py`.
+The cluster is running BC training now. Once `checkpoints/bc/epoch_010.pkl` is
+available, the self-play command will be:
 
----
-
-## Task 3.2 — Write `train_selfplay.py` (after 3.1b)
-
-**File to create:** `train_selfplay.py` (project root)
-
-**Hardware target:** Must run on both 2×H200 (cluster) AND RTX 5060 (8 GB, local).
-See `design_doc.md §4 → Hardware profiles` for the full comparison table.
-
-Full spec in `ROADMAP.md §Phase 3 → Task 3.2`. Summary:
-
-**Required CLI flags:**
-```
---n-actors N         parallel games in vmap (default 256 for H200, use 16 for 5060)
---buffer-capacity N  replay buffer size (default 500000, use 50000 for 5060)
---batch-size N       learner batch size (default 2048, use 256 for 5060)
---checkpoint-in PATH load BC checkpoint to init params (optional)
+### Cluster (H200 × 2):
+```bash
+python train_selfplay.py \
+  --bc-checkpoint checkpoints/bc/epoch_010.pkl \
+  --n-actors 256 \
+  --iterations 100 \
+  --checkpoint-dir checkpoints/selfplay
 ```
 
-Auto-detect single-GPU: if `len(jax.local_devices()) == 1`, Actor and Learner
-share the same device (interleaved, not async). No NVLink param sync needed.
-
+### Local (RTX 5060):
+```bash
+python train_selfplay.py \
+  --bc-checkpoint checkpoints/bc/epoch_010.pkl \
+  --n-actors 16 \
+  --buffer-capacity 50000 \
+  --batch-size 256 \
+  --iterations 100 \
+  --checkpoint-dir checkpoints/selfplay
 ```
-Loop:
-  Actor:
-    states = jax.vmap(jax_reset)(rng_keys)  # n_actors parallel games
-    while not all done:
-        policies = jax.vmap(jax_mcts_search, in_axes=(0,None,None,None))(states, params_stale, adj, model)
-        actions  = vmap(sample_from_policy)(policies, rng_keys)
-        states, rewards, dones = jax.vmap(jax_step)(states, actions)
-        buffer.push(obs, card_ctx, mask, action, reward, done, policy=policies)  # policy= is the MCTS distribution
-
-  Learner:
-    every 1 Actor batch:
-        batch = buffer.sample(batch_size, rng)
-        grads = jax.grad(alphazero_loss)(params, batch)
-        params = optimizer.update(params, grads)
-        if multi_gpu and step % 256 == 0:
-            broadcast params to Actor GPU
-```
-
-**AlphaZero loss:**
-```python
-L = cross_entropy(π_mcts, π_network)    # policy head vs MCTS visit counts
-  + 1.0 * mse(v_network, z_outcome)     # value head vs game outcome
-  + 1e-4 * L2(params)                   # weight decay
-```
-
-**CRITICAL: implement the search parameter schedule from `design_doc.md §2a`**
-
-The dataset is small (~195 records from 1 game). The value head BC init is weak.
-`train_selfplay.py` must read or accept `total_games_played` and apply:
-
-```python
-def get_search_params(total_games: int) -> tuple[int, int, float]:
-    """Returns (depth_limit, n_simulations, temperature)."""
-    if total_games < 2_000:
-        return 6, 256, 1.0   # Stage A: cold start, deep+wide search
-    elif total_games < 10_000:
-        return 5, 192, 1.0   # Stage B: warming
-    else:
-        return 4, 128, 0.5   # Stage C: mature value head
-```
-
-This directly addresses the sparse-data problem: when the value head is weak,
-deeper search and more simulations compensate by seeing further into the game
-tree. The schedule anneals to standard AlphaZero params as self-play accumulates.
-
----
-
-## Task 4.1 — Write `eval/tournament.py` (can do anytime)
-
-**File to create:** `eval/tournament.py`
-
-Spec in `ROADMAP.md §Phase 4 → Task 4.1`. Quick summary:
-- Load N checkpoint `.pkl` files from `checkpoints/`
-- Run 200 games between each pair (alternating AP/CP)
-- Compute Elo (400-point scale, random policy = 0)
-- Print table + save `eval/results.csv`
-
-This does NOT depend on `train_selfplay.py`. It can be written immediately
-using `pog_env.py` (CPU eval is fine for tournament play). Write it in parallel
-with Task 3.1b if time allows.
-
----
-
-## dtype note carried forward
-
-`unit_loc` is `jnp.uint8` in `jax_reset` but the roadmap spec says `int16`.
-OFFBOARD=255 fits in uint8, and all 72 space indices (0–71) fit too.
-This works but is inconsistent with the spec. Acceptable for now — do not fix
-mid-task as it would break `jax.vmap` shape contracts.

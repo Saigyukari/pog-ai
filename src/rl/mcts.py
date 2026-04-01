@@ -16,10 +16,13 @@ Tree arrays (all shape [MAX_NODES, ...]):
   is_terminal [MAX_NODES]    bool
 """
 
+import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
 from typing import NamedTuple, Callable, Optional
+
+from src.env.jax_env import jax_legal_mask, jax_obs, jax_step
 
 N_ACTIONS = 5341
 MAX_NODES = 512
@@ -34,6 +37,13 @@ class MCTSTree(NamedTuple):
     children:    jnp.ndarray   # (MAX_NODES, N_ACTIONS) int32 — child idx or -1
     parent:      jnp.ndarray   # (MAX_NODES,)           int32
     node_count:  jnp.ndarray   # () int32 — number of allocated nodes
+
+
+class RootSearchState(NamedTuple):
+    visits: jnp.ndarray
+    values: jnp.ndarray
+    prior: jnp.ndarray
+    rng_key: jnp.ndarray
 
 
 def create_tree() -> MCTSTree:
@@ -254,3 +264,142 @@ class MCTS:
             total = root_visits.sum()
             policy = root_visits / total if total > 0 else root_visits
         return policy
+
+
+def _flat_action_scores_jax(policy_heads) -> jnp.ndarray:
+    card_logits, atype_logits, src_logits, tgt_logits = policy_heads
+    batch = card_logits.shape[0]
+
+    scores = jnp.full((batch, N_ACTIONS), -1e9, dtype=card_logits.dtype)
+    scores = scores.at[:, 0].set(0.0)
+    scores = scores.at[:, 1:111].set(card_logits + atype_logits[:, 0:1])
+
+    ops_scores = card_logits[:, :, None] + atype_logits[:, None, :]
+    scores = scores.at[:, 111:441].set(ops_scores.reshape(batch, 330))
+
+    move_scores = src_logits[:, :, None] + tgt_logits[:, None, :]
+    scores = scores.at[:, 441:].set(move_scores.reshape(batch, -1)[:, : N_ACTIONS - 441])
+    return scores
+
+
+def _dirichlet_noise_for_legal(
+    rng_key: jnp.ndarray,
+    legal_mask: jnp.ndarray,
+    alpha: float,
+) -> jnp.ndarray:
+    gamma = jax.random.gamma(rng_key, alpha, shape=(N_ACTIONS,))
+    masked = gamma * legal_mask.astype(jnp.float32)
+    total = jnp.sum(masked)
+    fallback = legal_mask.astype(jnp.float32) / jnp.maximum(1.0, jnp.sum(legal_mask.astype(jnp.float32)))
+    return jnp.where(total > 0, masked / total, fallback)
+
+
+def _network_eval_jax(state, params, adj: jnp.ndarray, model) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    obs, card_ctx = jax_obs(state, state.active_player)
+    legal = jax_legal_mask(state)
+    policy_heads, value = model.apply(params, obs[None, ...], card_ctx[None, ...], adj)
+    scores = _flat_action_scores_jax(policy_heads)[0]
+    masked = jnp.where(legal, scores, -1e9)
+    probs = jax.nn.softmax(masked, axis=-1)
+    probs = probs * legal.astype(jnp.float32)
+    probs = probs / jnp.maximum(jnp.sum(probs), 1e-8)
+    return probs, value[0, 0], legal
+
+
+def _rollout_value(state, params, adj: jnp.ndarray, model, depth_limit: int) -> jnp.ndarray:
+    """
+    Truncated leaf evaluator for JAX MCTS.
+
+    This is intentionally lightweight: it advances up to `depth_limit - 1` greedy
+    plies using the JAX env and returns the terminal/leaf network value translated
+    back into the root player's frame.
+    """
+    root_player = state.active_player
+
+    def body(_, carry):
+        curr_state, done = carry
+
+        def do_step(step_state):
+            prior, _, legal = _network_eval_jax(step_state, params, adj, model)
+            masked = jnp.where(legal, prior, -1.0)
+            action = jnp.argmax(masked)
+            next_state, _, step_done = jax_step(step_state, action.astype(jnp.int32))
+            return next_state, step_done
+
+        next_state, next_done = jax.lax.cond(done, lambda s: (s, done), do_step, curr_state)
+        return next_state, next_done
+
+    leaf_state, _ = jax.lax.fori_loop(
+        0,
+        jnp.maximum(depth_limit - 1, 0),
+        body,
+        (state, jnp.asarray(False)),
+    )
+    _, leaf_value, _ = _network_eval_jax(leaf_state, params, adj, model)
+    same_player = leaf_state.active_player == root_player
+    return jnp.where(same_player, leaf_value, -leaf_value)
+
+
+def jax_mcts_search(
+    state,
+    params,
+    adj: jnp.ndarray,
+    model,
+    n_simulations: int = 128,
+    depth_limit: int = 4,
+    dirichlet_alpha: float = 0.3,
+    dirichlet_eps: float = 0.25,
+) -> jnp.ndarray:
+    """
+    Pure-JAX root-search MCTS variant for vmapped actor usage.
+
+    The existing `MCTS` class remains the CPU/Python implementation. This helper
+    is additive and uses the JAX env (`jax_step`) so it can be wrapped by
+    `jax.vmap` for batched actor rollouts.
+    """
+    root_prior, _, root_legal = _network_eval_jax(state, params, adj, model)
+    noise_key, sim_key = jax.random.split(state.rng_key)
+    noise = _dirichlet_noise_for_legal(noise_key, root_legal, dirichlet_alpha)
+    prior = ((1.0 - dirichlet_eps) * root_prior + dirichlet_eps * noise) * root_legal.astype(jnp.float32)
+    prior = prior / jnp.maximum(jnp.sum(prior), 1e-8)
+
+    init = RootSearchState(
+        visits=jnp.zeros((N_ACTIONS,), dtype=jnp.int32),
+        values=jnp.zeros((N_ACTIONS,), dtype=jnp.float32),
+        prior=prior,
+        rng_key=sim_key,
+    )
+
+    def sim_body(_, carry):
+        visits, values, sim_prior, rng_key = carry
+        total_n = jnp.sum(visits).astype(jnp.float32)
+        q = jnp.where(visits > 0, values / visits.astype(jnp.float32), 0.0)
+        u = C_PUCT * sim_prior * jnp.sqrt(total_n + 1.0) / (1.0 + visits.astype(jnp.float32))
+        scores = jnp.where(root_legal, q + u, -jnp.inf)
+        action = jnp.argmax(scores).astype(jnp.int32)
+
+        rng_key, step_key = jax.random.split(rng_key)
+        stepped_state = state._replace(rng_key=step_key)
+        next_state, _, done = jax_step(stepped_state, action)
+        leaf_value = jax.lax.cond(
+            done,
+            lambda _: jnp.asarray(0.0, dtype=jnp.float32),
+            lambda s: _rollout_value(s, params, adj, model, depth_limit),
+            next_state,
+        )
+        root_value = -leaf_value
+
+        visits = visits.at[action].add(1)
+        values = values.at[action].add(root_value)
+        return RootSearchState(visits=visits, values=values, prior=sim_prior, rng_key=rng_key)
+
+    result = jax.lax.fori_loop(0, n_simulations, sim_body, init)
+    visits = result.visits
+    visit_sum = jnp.sum(visits)
+    return jnp.where(visit_sum > 0, visits.astype(jnp.float32) / visit_sum.astype(jnp.float32), prior)
+
+
+jax_mcts_search_jit = functools.partial(
+    jax.jit,
+    static_argnums=(3, 4, 5, 6, 7),
+)(jax_mcts_search)
