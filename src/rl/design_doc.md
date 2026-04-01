@@ -232,25 +232,47 @@ prevents the "curse of dimensionality" on a 5341-action space.
 └─────────────────────────────────────────────────────────┘
 ```
 
+### Hardware profiles
+
+Two supported hardware modes. `train_selfplay.py` auto-detects via `jax.local_devices()`.
+
+| Parameter | H200 × 2 (cluster) | RTX 5060 (local) |
+|---|---|---|
+| `--n-actors` | 256 | 16 |
+| `--batch-size` (BC) | 4096 | 32 |
+| `--buffer-capacity` | 500 000 | 50 000 |
+| MCTSTree VRAM | 256 × 44 MB = 11 GB | 16 × 44 MB = 704 MB |
+| Buffer VRAM | ~18 GB | ~1.8 GB |
+| Model VRAM | ~1 GB (fp16) | ~1 GB (fp32) |
+| **Total Actor VRAM** | **~13 GB on GPU 1** | **~3.5 GB** ✓ |
+| Self-play throughput | ~15K records/sec | ~950 records/sec |
+| Approx. time to 10K games | ~30 min | ~8 hours |
+
+The RTX 5060 is **fully capable** of training and inference — just slower.
+Use the cluster to train fast; use the 5060 for playing against the trained model
+and for smaller continued self-play runs.
+
+**Inference only (playing against AI on 5060):**
+Model is ~26 MB at fp32. Single-game MCTS (N_sim=64, depth=4): ~50–100 ms/move.
+No VRAM pressure at all.
+
 ### Training phases
 
 **Phase 1 — Behavioral Cloning (BC)**
-- Both GPUs used for data-parallel BC (JAX pmap across 2 GPUs)
 - Dataset: `data/training/expert_games.jsonl`
-- Batch: 4096 split across 2 GPUs = 2048 per GPU
 - **Data volume determines curriculum:**
   - <500 records: Phase 1 only (policy-head, epochs 1–10). Skip value curriculum.
-    `python train_bc.py --epochs 10`
+    H200: `python train_bc.py --epochs 10 --batch-size 4096`
+    5060: `python train_bc.py --epochs 10 --batch-size 32`
   - 5K–20K records: Full 3-phase curriculum, 50 epochs.
-    `python train_bc.py --epochs 50`
   - 50K+ records: Full curriculum, 200 epochs — target performance tier.
 - Stop when policy cross-entropy plateaus
 
 **Phase 2 — Self-Play RL**
-- Switch to async Actor-Learner split (one GPU each)
 - Actor generates truncated MCTS games, Learner trains on trajectories
 - Loss: AlphaZero combined — `L = L_policy + λ_v × L_value + λ_reg × L_L2`
-- Replay buffer: 500K records (FIFO), minimum fill 50K before RL starts
+- Replay buffer: 500K records on H200, 50K on 5060 (FIFO)
+- Minimum buffer fill (10% capacity) before RL gradient steps start
 - Target: Elo gain measurable after ~10K self-play games
 
 **Phase 3 — Evaluation**

@@ -20,6 +20,7 @@ class ReplayBufferState:
     obs: jnp.ndarray
     card_ctx: jnp.ndarray
     mask: jnp.ndarray
+    policy: jnp.ndarray
     action: jnp.ndarray
     reward: jnp.ndarray
     done: jnp.ndarray
@@ -41,6 +42,7 @@ class VRAMReplayBuffer:
             obs=jnp.zeros((capacity, 32, 72), dtype=jnp.float32),
             card_ctx=jnp.zeros((capacity, 7, 16), dtype=jnp.float32),
             mask=jnp.zeros((capacity, 5341), dtype=jnp.bool_),
+            policy=jnp.zeros((capacity, 5341), dtype=jnp.float32),
             action=jnp.zeros((capacity,), dtype=jnp.int32),
             reward=jnp.zeros((capacity,), dtype=jnp.float32),
             done=jnp.zeros((capacity,), dtype=jnp.bool_),
@@ -51,18 +53,23 @@ class VRAMReplayBuffer:
     def __len__(self) -> int:
         return int(self.state.size)
 
-    def push(self, obs, card_ctx, mask, action, reward, done):
+    def push(self, obs, card_ctx, mask, action, reward, done, policy=None):
         obs = jnp.asarray(obs, dtype=jnp.float32)
         card_ctx = jnp.asarray(card_ctx, dtype=jnp.float32)
         mask = jnp.asarray(mask, dtype=jnp.bool_)
         action = jnp.asarray(action, dtype=jnp.int32)
         reward = jnp.asarray(reward, dtype=jnp.float32)
         done = jnp.asarray(done, dtype=jnp.bool_)
+        if policy is None:
+            policy = jax.nn.one_hot(action, 5341, dtype=jnp.float32)
+        else:
+            policy = jnp.asarray(policy, dtype=jnp.float32)
 
         if obs.ndim == 2:
             obs = obs[None, ...]
             card_ctx = card_ctx[None, ...]
             mask = mask[None, ...]
+            policy = policy[None, ...]
             action = action[None, ...]
             reward = reward[None, ...]
             done = done[None, ...]
@@ -74,6 +81,7 @@ class VRAMReplayBuffer:
             obs=self.state.obs.at[indices].set(obs),
             card_ctx=self.state.card_ctx.at[indices].set(card_ctx),
             mask=self.state.mask.at[indices].set(mask),
+            policy=self.state.policy.at[indices].set(policy),
             action=self.state.action.at[indices].set(action),
             reward=self.state.reward.at[indices].set(reward),
             done=self.state.done.at[indices].set(done),
@@ -92,6 +100,7 @@ class VRAMReplayBuffer:
             self.state.obs[idx],
             self.state.card_ctx[idx],
             self.state.mask[idx],
+            self.state.policy[idx],
             self.state.action[idx],
             self.state.reward[idx],
             self.state.done[idx],
@@ -111,6 +120,7 @@ class VRAMReplayBuffer:
                 self.state.obs[:size],
                 self.state.card_ctx[:size],
                 self.state.mask[:size],
+                self.state.policy[:size],
                 self.state.action[:size],
                 self.state.reward[:size],
                 self.state.done[:size],
@@ -124,11 +134,12 @@ class VRAMReplayBuffer:
             handle.create_dataset("obs", data=payload[0])
             handle.create_dataset("card_ctx", data=payload[1])
             handle.create_dataset("mask", data=payload[2])
-            handle.create_dataset("action", data=payload[3])
-            handle.create_dataset("reward", data=payload[4])
-            handle.create_dataset("done", data=payload[5])
-            handle.attrs["position"] = int(payload[6])
-            handle.attrs["size"] = int(payload[7])
+            handle.create_dataset("policy", data=payload[3])
+            handle.create_dataset("action", data=payload[4])
+            handle.create_dataset("reward", data=payload[5])
+            handle.create_dataset("done", data=payload[6])
+            handle.attrs["position"] = int(payload[7])
+            handle.attrs["size"] = int(payload[8])
 
     def load_hdf5(self, path: str):
         try:
@@ -146,6 +157,7 @@ class VRAMReplayBuffer:
             obs = self.state.obs.at[:size].set(jnp.asarray(handle["obs"][...], dtype=jnp.float32))
             card_ctx = self.state.card_ctx.at[:size].set(jnp.asarray(handle["card_ctx"][...], dtype=jnp.float32))
             mask = self.state.mask.at[:size].set(jnp.asarray(handle["mask"][...], dtype=jnp.bool_))
+            policy = self.state.policy.at[:size].set(jnp.asarray(handle["policy"][...], dtype=jnp.float32))
             action = self.state.action.at[:size].set(jnp.asarray(handle["action"][...], dtype=jnp.int32))
             reward = self.state.reward.at[:size].set(jnp.asarray(handle["reward"][...], dtype=jnp.float32))
             done = self.state.done.at[:size].set(jnp.asarray(handle["done"][...], dtype=jnp.bool_))
@@ -154,6 +166,7 @@ class VRAMReplayBuffer:
             obs=obs,
             card_ctx=card_ctx,
             mask=mask,
+            policy=policy,
             action=action,
             reward=reward,
             done=done,

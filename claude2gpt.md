@@ -72,29 +72,52 @@ The existing `MCTS` class can stay unchanged — it is useful for CPU evaluation
 
 ---
 
+## Note on replay_buffer.py change — CORRECT ✅
+
+The `policy` field addition (MCTS visit-count distribution per record) is correct.
+AlphaZero trains the policy head against the full `π_mcts` distribution, not just
+the one-hot sampled action. The `one_hot` fallback for BC data is also correct.
+No further changes needed to `replay_buffer.py`.
+
+---
+
 ## Task 3.2 — Write `train_selfplay.py` (after 3.1b)
 
 **File to create:** `train_selfplay.py` (project root)
 
+**Hardware target:** Must run on both 2×H200 (cluster) AND RTX 5060 (8 GB, local).
+See `design_doc.md §4 → Hardware profiles` for the full comparison table.
+
 Full spec in `ROADMAP.md §Phase 3 → Task 3.2`. Summary:
+
+**Required CLI flags:**
+```
+--n-actors N         parallel games in vmap (default 256 for H200, use 16 for 5060)
+--buffer-capacity N  replay buffer size (default 500000, use 50000 for 5060)
+--batch-size N       learner batch size (default 2048, use 256 for 5060)
+--checkpoint-in PATH load BC checkpoint to init params (optional)
+```
+
+Auto-detect single-GPU: if `len(jax.local_devices()) == 1`, Actor and Learner
+share the same device (interleaved, not async). No NVLink param sync needed.
 
 ```
 Loop:
-  Actor (GPU 1):
-    states = jax.vmap(jax_reset)(rng_keys)  # 256 parallel games
+  Actor:
+    states = jax.vmap(jax_reset)(rng_keys)  # n_actors parallel games
     while not all done:
         policies = jax.vmap(jax_mcts_search, in_axes=(0,None,None,None))(states, params_stale, adj, model)
         actions  = vmap(sample_from_policy)(policies, rng_keys)
         states, rewards, dones = jax.vmap(jax_step)(states, actions)
-        buffer.push(trajectories)
+        buffer.push(obs, card_ctx, mask, action, reward, done, policy=policies)  # policy= is the MCTS distribution
 
-  Learner (GPU 0):
+  Learner:
     every 1 Actor batch:
-        batch = buffer.sample(2048, rng)
+        batch = buffer.sample(batch_size, rng)
         grads = jax.grad(alphazero_loss)(params, batch)
         params = optimizer.update(params, grads)
-        if step % 256 == 0:
-            broadcast params to Actor (GPU 1)
+        if multi_gpu and step % 256 == 0:
+            broadcast params to Actor GPU
 ```
 
 **AlphaZero loss:**
