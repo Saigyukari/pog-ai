@@ -111,8 +111,8 @@ enumerate hidden information explicitly.
 
 ```python
 MAX_NODES  = 512     # was 4096 — truncated search needs far fewer nodes
-DEPTH_LIMIT = 4      # hard cutoff; value head called at this depth
-N_SIMULATIONS = 128  # per move decision (scales with compute budget)
+DEPTH_LIMIT = 4      # hard cutoff; value head called at this depth (see §2a for schedule)
+N_SIMULATIONS = 128  # per move decision (see §2a for schedule)
 C_PUCT     = 1.5     # unchanged
 DIRICHLET_ALPHA = 0.3
 DIRICHLET_EPS   = 0.25
@@ -120,6 +120,48 @@ DIRICHLET_EPS   = 0.25
 
 MAX_NODES reduction from 4096→512 is critical for vmap batching on GPU
 (see §4 hardware plan).
+
+### §2a — Search parameter schedule (small-data adaptation)
+
+**Problem:** Optimal MCTS depth is inversely related to value head quality.
+- Strong value head (post self-play): depth 4 is sufficient — it can evaluate
+  positions accurately, so there is little gain beyond one tactical loop.
+- Weak value head (early training, <1K self-play games): depth 4 returns
+  near-random leaf values. Going deeper reaches positions where the outcome
+  is more legible (winning/losing positions are more obvious structurally).
+
+This matters especially when BC data is sparse (e.g., <500 records).
+The value head trained on 1–2 games has learned the outcome of those specific
+games, not general positional value. Deeper search partially compensates.
+
+**The CRT variance limit:** Increasing depth beyond 6 in PoG hits the
+stochasticity wall (§1a). At depth 6 with K=2 combats/ply: `7^2^6 ≈ 10^10`
+terminal configurations over the search horizon — averaging over N_sim paths
+is still tractable, but depth 8+ is not. **Hard cap: depth ≤ 6.**
+
+**N_simulations** is a cleaner lever than depth for compensating a weak value
+head: more simulations average over more CRT outcomes without deepening the
+noise cone. Prefer increasing N_sim before increasing depth.
+
+**Recommended schedule for `train_selfplay.py`:**
+
+| Stage | Self-play games | depth_limit | N_sim | Temperature |
+|---|---|---|---|---|
+| A — Cold start | 0 – 2 K | 6 | 256 | 1.0 |
+| B — Warming | 2 K – 10 K | 5 | 192 | 1.0 |
+| C — Mature | 10 K + | 4 | 128 | 0.5 |
+
+**Memory note (Stage A, depth=6, N_sim=256):**
+MAX_NODES=512 may fill after ~85 simulations (6 new nodes/sim early on).
+Once the tree is full, selection reuses existing nodes — the search becomes
+more focused rather than failing. This is acceptable. No change to MAX_NODES
+needed; 141 GB H200 has headroom if a larger tree (1024 nodes) is needed.
+
+**BC adjustment for sparse data:**
+With <500 records, run Phase 1 only (policy-head BC, epochs 1–10) and skip
+Phase 2/3. The value head cannot learn anything meaningful from 1–2 game
+outcomes and will overfit. Let self-play build the value head from scratch.
+`train_bc.py --epochs 10` is the right invocation for sparse data.
 
 ### What we do NOT use
 
@@ -194,10 +236,14 @@ prevents the "curse of dimensionality" on a 5341-action space.
 
 **Phase 1 — Behavioral Cloning (BC)**
 - Both GPUs used for data-parallel BC (JAX pmap across 2 GPUs)
-- Dataset: `data/training/expert_games.jsonl` (~20K records)
+- Dataset: `data/training/expert_games.jsonl`
 - Batch: 4096 split across 2 GPUs = 2048 per GPU
-- 3-phase curriculum (bc_pipeline.py): policy-only → +value(λ=0.1) → full(λ=1.0)
-- Target: ~200 epochs, ~2–4 hours on 2×H200
+- **Data volume determines curriculum:**
+  - <500 records: Phase 1 only (policy-head, epochs 1–10). Skip value curriculum.
+    `python train_bc.py --epochs 10`
+  - 5K–20K records: Full 3-phase curriculum, 50 epochs.
+    `python train_bc.py --epochs 50`
+  - 50K+ records: Full curriculum, 200 epochs — target performance tier.
 - Stop when policy cross-entropy plateaus
 
 **Phase 2 — Self-Play RL**
@@ -278,7 +324,7 @@ minimal Elo regression once the value head is strong.
 | Chance nodes? | **No** | Single-sample path instead (§2) |
 | PIMC? | **No** | Strategy fusion (§1b) |
 | CFR/R-NaD? | **No, revisit at phase 3** | Requires full-game abstraction |
-| Search depth | **3–5 plies** | One tactical loop + EV at leaf |
+| Search depth | **4–6 plies (scheduled)** | Start deep (weak value head), anneal to 4 as value matures (§2a) |
 | Leaf evaluator | **GNN value head** | TD-Gammon precedent |
 | Hidden info | **Implicit via value head** | DeepNash/AlphaZero precedent |
 | GPU 0 role | **Learner** | Large-batch gradient updates |

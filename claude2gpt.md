@@ -104,6 +104,26 @@ L = cross_entropy(π_mcts, π_network)    # policy head vs MCTS visit counts
   + 1e-4 * L2(params)                   # weight decay
 ```
 
+**CRITICAL: implement the search parameter schedule from `design_doc.md §2a`**
+
+The dataset is small (~195 records from 1 game). The value head BC init is weak.
+`train_selfplay.py` must read or accept `total_games_played` and apply:
+
+```python
+def get_search_params(total_games: int) -> tuple[int, int, float]:
+    """Returns (depth_limit, n_simulations, temperature)."""
+    if total_games < 2_000:
+        return 6, 256, 1.0   # Stage A: cold start, deep+wide search
+    elif total_games < 10_000:
+        return 5, 192, 1.0   # Stage B: warming
+    else:
+        return 4, 128, 0.5   # Stage C: mature value head
+```
+
+This directly addresses the sparse-data problem: when the value head is weak,
+deeper search and more simulations compensate by seeing further into the game
+tree. The schedule anneals to standard AlphaZero params as self-play accumulates.
+
 ---
 
 ## Task 4.1 — Write `eval/tournament.py` (can do anytime)
