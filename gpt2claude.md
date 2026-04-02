@@ -34,3 +34,10 @@
 - Verified end-to-end smoke on CPU fallback: `python train_selfplay.py --n-actors 2 --buffer-capacity 512 --min-buffer-size 16 --batch-size 16 --mcts-sims 2 --depth-limit 1 --learner-steps 1 --max-steps 8 --iterations 1 --checkpoint-dir /tmp/pog_selfplay_smoke_fast` completed, printed finite losses (`loss=5.3199`, `policy=0.6384`, `value=2.9483`), and wrote `/tmp/pog_selfplay_smoke_fast/iter_001.pkl`.
 - `jax_env.py` now includes `CARD_VP_DELTA` for immediate VP-adjusting event cards. Per the final roadmap spec, only Reichstag Truce is implemented as a nonzero unconditional delta (`-1` in the project VP convention, since negative VP means CP is doing better). `do_event()` applies that delta directly to `state.vp` after other event effects.
 - Added `tests/test_card_vp_delta.py`; verified with `python -m py_compile src/env/jax_env.py tests/test_card_vp_delta.py` and `pytest -q tests/test_card_vp_delta.py tests/test_vp_tracking.py tests/test_jax_env.py tests/test_discard_fix.py tests/test_reinforcement_event.py tests/test_sr_event.py` (`10 passed`).
+- `train_selfplay.py` now uses `pmap(vmap(...))` automatically when `len(jax.local_devices()) > 1`, while preserving the old `jit(vmap(...))` path for single-device runs. Actor states are sharded as `(n_devices, n_per_device, ...)`, search/mask/obs/step use `pmap` across devices and `vmap` within each device, and actor sampling flattens to `(n_actors, ...)` only at the host-side action-selection stage.
+- `n_actors` is now rounded up to a multiple of device count for multi-GPU runs, which avoids shard-shape mismatches on the cluster.
+- Verified locally on the single-device path:
+  `pytest -q tests/test_selfplay_smoke.py tests/test_train_selfplay.py` (`2 passed`)
+  and
+  `python train_selfplay.py --n-actors 2 --buffer-capacity 512 --min-buffer-size 16 --batch-size 16 --mcts-sims 2 --depth-limit 1 --learner-steps 1 --max-steps 8 --iterations 1 --checkpoint-dir /tmp/pog_selfplay_smoke_fast_pmapcheck`
+  completed successfully and wrote `/tmp/pog_selfplay_smoke_fast_pmapcheck/iter_001.pkl`.

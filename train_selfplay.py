@@ -162,6 +162,11 @@ def main() -> int:
     n_local_devices = len(jax.local_devices())
     multi_gpu = n_local_devices > 1
     n_actors = args.n_actors or args.num_envs or (256 if multi_gpu else 16)
+    n_per_device = n_actors // n_local_devices
+    if n_actors % n_local_devices != 0:
+        n_actors = (n_actors // n_local_devices + 1) * n_local_devices
+        n_per_device = n_actors // n_local_devices
+        print(f"Rounded n_actors to {n_actors} (divisible by {n_local_devices} devices)")
     if args.buffer_capacity == 50_000 and multi_gpu:
         args.buffer_capacity = 500_000
 
@@ -182,9 +187,14 @@ def main() -> int:
     actor_params = learner_state.params
     learner_step = build_learner_step(model, adj)
     replay = VRAMReplayBuffer(capacity=args.buffer_capacity)
-    batched_mask = jax.jit(jax.vmap(jax_legal_mask))
-    batched_step = jax.jit(jax.vmap(jax_step))
-    batched_obs = jax.jit(jax.vmap(jax_obs, in_axes=(0, 0)))
+    if n_local_devices > 1:
+        batched_mask = jax.pmap(jax.vmap(jax_legal_mask))
+        batched_step = jax.pmap(jax.vmap(jax_step))
+        batched_obs = jax.pmap(jax.vmap(jax_obs, in_axes=(0, 0)))
+    else:
+        batched_mask = jax.jit(jax.vmap(jax_legal_mask))
+        batched_step = jax.jit(jax.vmap(jax_step))
+        batched_obs = jax.jit(jax.vmap(jax_obs, in_axes=(0, 0)))
 
     rng = jax.random.PRNGKey(args.seed)
     learner_updates = 0
@@ -197,7 +207,12 @@ def main() -> int:
 
     for iteration in range(1, args.iterations + 1):
         rng, reset_key, sample_key = jax.random.split(rng, 3)
-        states = jax.vmap(jax_reset)(jax.random.split(reset_key, n_actors))
+        all_reset_keys = jax.random.split(reset_key, n_actors)
+        if n_local_devices > 1:
+            shaped_keys = all_reset_keys.reshape(n_local_devices, n_per_device, 2)
+            states = jax.pmap(jax.vmap(jax_reset))(shaped_keys)
+        else:
+            states = jax.vmap(jax_reset)(all_reset_keys)
         slots = [EpisodeSlot([], [], [], [], []) for _ in range(n_actors)]
         done_mask = np.zeros((n_actors,), dtype=bool)
 
@@ -214,7 +229,15 @@ def main() -> int:
             n_simulations=n_simulations,
             depth_limit=depth_limit,
         )
-        batched_search = jax.jit(jax.vmap(search_fn))
+        if n_local_devices > 1:
+            batched_search = jax.pmap(jax.vmap(search_fn))
+        else:
+            batched_search = jax.jit(jax.vmap(search_fn))
+
+        def _flat(x):
+            if n_local_devices > 1:
+                return x.reshape(n_actors, *x.shape[2:])
+            return x
 
         actor_steps = 0
         while actor_steps < args.max_steps and not np.all(done_mask):
@@ -223,20 +246,25 @@ def main() -> int:
             mask_batch = batched_mask(states)
             policy_batch = batched_search(states)
 
+            policy_flat = _flat(policy_batch)
             sample_key, action_key = jax.random.split(sample_key)
             action_keys = jax.random.split(action_key, n_actors)
-            tempered = jnp.power(policy_batch, 1.0 / jnp.maximum(temperature, 1e-6))
+            tempered = jnp.power(policy_flat, 1.0 / jnp.maximum(temperature, 1e-6))
             tempered = tempered / jnp.maximum(jnp.sum(tempered, axis=-1, keepdims=True), 1e-8)
-            action_batch = jax.vmap(lambda p, k: jax.random.choice(k, N_ACTIONS, p=p))(tempered, action_keys)
+            action_flat = jax.vmap(lambda p, k: jax.random.choice(k, N_ACTIONS, p=p))(tempered, action_keys)
+            if n_local_devices > 1:
+                action_batch = action_flat.reshape(n_local_devices, n_per_device)
+            else:
+                action_batch = action_flat
             next_states, reward_batch, done_batch = batched_step(states, action_batch)
 
-            obs_np = np.asarray(jax.device_get(obs_batch))
-            ctx_np = np.asarray(jax.device_get(card_ctx_batch))
-            mask_np = np.asarray(jax.device_get(mask_batch))
-            policy_np = np.asarray(jax.device_get(policy_batch))
-            action_np = np.asarray(jax.device_get(action_batch))
-            next_states_host = jax.device_get(next_states)
-            done_np = np.asarray(jax.device_get(done_batch))
+            obs_np = np.asarray(jax.device_get(_flat(obs_batch)))
+            ctx_np = np.asarray(jax.device_get(_flat(card_ctx_batch)))
+            mask_np = np.asarray(jax.device_get(_flat(mask_batch)))
+            policy_np = np.asarray(jax.device_get(policy_flat))
+            action_np = np.asarray(jax.device_get(action_flat))
+            next_states_host = jax.device_get(jax.tree_util.tree_map(_flat, next_states))
+            done_np = np.asarray(jax.device_get(_flat(done_batch)))
 
             completed_games = 0
             for i in range(n_actors):
@@ -275,7 +303,7 @@ def main() -> int:
                 learner_state, metrics = learner_step(learner_state, batch)
                 metrics_rows.append({k: float(v) for k, v in metrics.items()})
                 learner_updates += 1
-                if (not multi_gpu) or (learner_updates % args.sync_every == 0):
+                if n_local_devices == 1 or (learner_updates % args.sync_every == 0):
                     actor_params = learner_state.params
 
         metric_str = ""
