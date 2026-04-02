@@ -33,7 +33,7 @@ Phase 8 — RL Training       ░░░░░░░░░░░░░░░░�
 | `src/rl/mcts.py` | Pre-allocated MCTS tree, UCB scores, Dirichlet noise |
 | `src/data/rtt_parser.py` | RTT JSON → training JSONL (`extract_training_records`) |
 | `data/rtt_space_map.json` | RTT space integer → our space str_id (67/72 spaces) |
-| `data/training/expert_games.jsonl` | ~20,000 expert records, ready for BC |
+| `data/training/expert_games.jsonl` | 12,043 expert records (10,411 train / 1,632 test), ready for BC |
 | `pog_map_graph.json` | 72-space board graph |
 | `pog_cards_db.json` | 130 unique cards |
 
@@ -73,8 +73,8 @@ from src.rl.network import PoGNet, create_train_state, load_adjacency_matrix
 - Checkpoint saved at `checkpoints/bc/epoch_030.pkl`
 
 **Data volume needed:**
-- 20K records: smoke test (will overfit — expect high train acc, low val acc)
-- 50K+ records: meaningful BC (collect more RTT games via `src/data/rtt_parser.py`)
+- **12,043 records available** (10,411 train / 1,632 test) — sufficient for meaningful BC
+- 50K+ records: stronger BC (scrape more via `src/data/rtt_parser.py` if desired)
 
 ---
 
@@ -346,7 +346,7 @@ After Task 7.8, simulation is engineering-complete. Remaining steps:
    python scrape_rtt_expert.py          # scrape RTT server
    python src/data/rtt_parser.py data/rtt_games/ --output data/training/expert_games.jsonl
    ```
-   Target ≥ 2 000 records (current: ~195 — BC overfits badly at 195).
+   Already have 12,043 records — scraping more is optional.
 
 2. **Wait for cluster BC checkpoint** (`checkpoints/bc/epoch_010.pkl`)
 
@@ -432,7 +432,7 @@ See `src/rl/design_doc.md` §1–3 for full justification.
 ## Dependency graph
 
 ```
-[expert_games.jsonl ~20K]
+[expert_games.jsonl 12K]
          │
          ▼
 [Task 1.1] train_bc.py           ← UNBLOCKED, implement first
@@ -472,7 +472,7 @@ PoGAIV1/
 ├── data/
 │   ├── rtt_games/                   ← drop RTT JSON exports here
 │   ├── training/
-│   │   └── expert_games.jsonl       ✓ ~20K records ready
+│   │   └── expert_games.jsonl       ✓ 12,043 records ready
 │   ├── rtt_space_map.json           ✓ done
 │   └── data.js                      ✓ RTT source (reference only)
 │
