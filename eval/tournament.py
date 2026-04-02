@@ -106,9 +106,9 @@ def play_game(ap_agent: AgentSpec, cp_agent: AgentSpec, model: PoGNet, adj: jnp.
                 return -1
             return 0
 
-    if env.vp_track < 0:
-        return 1
     if env.vp_track > 0:
+        return 1
+    if env.vp_track < 0:
         return -1
     return 0
 

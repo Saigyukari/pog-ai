@@ -171,9 +171,9 @@ def choose_ai_action(env: PogEnv, model: PoGNet, params, adj, args: argparse.Nam
 
 
 def print_result(env: PogEnv) -> None:
-    if env.vp_track < 0:
+    if env.vp_track > 0:
         print("Game result: AP wins")
-    elif env.vp_track > 0:
+    elif env.vp_track < 0:
         print("Game result: CP wins")
     else:
         print("Game result: Draw")

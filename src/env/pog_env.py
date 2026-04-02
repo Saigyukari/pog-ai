@@ -45,6 +45,7 @@ ACT_PASS       = 0
 ACT_EVENT_START = 1    # [1, 111)
 ACT_OPS_START  = 111   # [111, 441)
 ACT_MOVE_START = 441   # [441, 5341)
+OFFBOARD = 255
 
 
 class PogEnv:
@@ -100,6 +101,10 @@ class PogEnv:
         self._cp_hand: List[int] = []
         self._ap_deck: List[int] = []
         self._cp_deck: List[int] = []
+        self._ap_played: List[int] = []
+        self._cp_played: List[int] = []
+        self._ap_permanent_discard: set = set()
+        self._cp_permanent_discard: set = set()
         self._ap_supply_sources: set = set()
         self._cp_supply_sources: set = set()
 
@@ -120,6 +125,10 @@ class PogEnv:
         self.war_status_ap = PHASE_LIMITED
         self.war_status_cp = PHASE_LIMITED
         self.vp_track      = 0
+        self._ap_played = []
+        self._cp_played = []
+        self._ap_permanent_discard = set()
+        self._cp_permanent_discard = set()
 
         n = self._n_spaces
         self._trench_levels  = np.zeros(n, dtype=np.int8)
@@ -128,6 +137,7 @@ class PogEnv:
         self._fort_destroyed = np.zeros(n, dtype=bool)
         self._units          = self._build_starting_units()
 
+        self.vp_track = self._recompute_vp_track()
         self._update_oos()
 
         # Deal opening hands: AP=6, CP=7
@@ -191,7 +201,7 @@ class PogEnv:
         if abs(self.vp_track) >= 20 or self.turn > 20:
             for ag in self.agents:
                 done[ag] = True
-            winner = FACTION_AP if self.vp_track <= -10 else FACTION_CP
+            winner = FACTION_AP if self.vp_track > 0 else FACTION_CP
             reward["AP"] =  1.0 if winner == FACTION_AP else -1.0
             reward["CP"] = -reward["AP"]
 
@@ -295,12 +305,14 @@ class PogEnv:
                 seen[sid] = len(self._cards_db)
                 self._cards_db.append({
                     "str_id":        sid,
+                    "name":          entry.get("name", sid),
                     "faction":       faction_int,
                     "ops":           entry.get("ops", 2),
                     "sr":            entry.get("sr", 2),
                     "is_combat_card": entry.get("is_combat_card", False),
                     "phase_gate":    phase_int,
                     "event_text":    entry.get("event_text", ""),
+                    "remove_after_event": entry.get("remove_after_event", True),
                 })
 
             idx = seen[sid]
@@ -324,18 +336,47 @@ class PogEnv:
     # Game logic
     # ──────────────────────────────────────────────────────────────────
 
+    def _bring_unit_on_map(self, faction: int):
+        """Move first OFFBOARD unit of faction to first available source space."""
+        source_spaces = sorted(self._ap_supply_sources if faction == FACTION_AP else self._cp_supply_sources)
+        if not source_spaces:
+            return
+        tgt = source_spaces[0]
+        for u in self._units:
+            if u["faction"] == faction and u["location"] == OFFBOARD:
+                u["location"] = tgt
+                u["is_eliminated"] = False
+                return
+
     def _play_event(self, card_idx: int):
         hand = self._ap_hand if self.active_player == FACTION_AP else self._cp_hand
         if card_idx in hand:
             hand.remove(card_idx)
-        # Individual event resolution not yet implemented
+        card = self._cards_db[card_idx] if card_idx < len(self._cards_db) else {}
+        if card.get("remove_after_event", True):
+            if self.active_player == FACTION_AP:
+                self._ap_permanent_discard.add(card_idx)
+            else:
+                self._cp_permanent_discard.add(card_idx)
+        else:
+            if self.active_player == FACTION_AP:
+                self._ap_played.append(card_idx)
+            else:
+                self._cp_played.append(card_idx)
+
+        if "reinforcement" in card.get("name", "").lower():
+            self._bring_unit_on_map(self.active_player)
 
     def _play_ops(self, card_idx: int, op_type: int):
         hand = self._ap_hand if self.active_player == FACTION_AP else self._cp_hand
         if card_idx in hand:
             hand.remove(card_idx)
-        # op_type: 0=MOVE, 1=ATTACK, 2=SR
-        # Actual unit movement is via MOVE_UNIT actions
+        if self.active_player == FACTION_AP:
+            self._ap_played.append(card_idx)
+        else:
+            self._cp_played.append(card_idx)
+        if op_type == 2:
+            self._bring_unit_on_map(self.active_player)
 
     def _execute_move(self, src: int, tgt: int):
         faction = self.active_player
@@ -367,6 +408,7 @@ class PogEnv:
                         for du in def_units:
                             du["is_eliminated"] = True
                         self._space_control[tgt] = faction
+                        self.vp_track = self._recompute_vp_track()
                     else:
                         for _ in range(result["defender_losses"]):
                             if def_units:
@@ -380,18 +422,24 @@ class PogEnv:
                 else:
                     u["location"] = tgt
                     self._space_control[tgt] = faction
+                    self.vp_track = self._recompute_vp_track()
                 break
 
     def _advance_turn(self):
         self.action_round += 1
         if self.action_round > 7:
             self.action_round = 1
-            # Draw cards
-            if self._ap_deck:
-                self._ap_hand.append(self._ap_deck.pop(0))
-            if self._cp_deck:
-                self._cp_hand.append(self._cp_deck.pop(0))
             self.turn += 1
+            random.shuffle(self._ap_played)
+            self._ap_deck.extend(self._ap_played)
+            self._ap_played = []
+            random.shuffle(self._cp_played)
+            self._cp_deck.extend(self._cp_played)
+            self._cp_played = []
+            while len(self._ap_hand) < 7 and self._ap_deck:
+                self._ap_hand.append(self._ap_deck.pop(0))
+            while len(self._cp_hand) < 7 and self._cp_deck:
+                self._cp_hand.append(self._cp_deck.pop(0))
         self.active_player = 1 - self.active_player
 
     def _update_oos(self):
@@ -494,6 +542,16 @@ class PogEnv:
                 if nxt not in visited and self._space_control[nxt] == faction:
                     queue.append(nxt)
         return True
+
+    def _recompute_vp_track(self) -> int:
+        """
+        Positive VP means AP is winning, matching the JAX env.
+        """
+        if self._space_control is None or self._space_vp is None:
+            return 0
+        ap_total = int(np.sum(self._space_vp[self._space_control == FACTION_AP]))
+        cp_total = int(np.sum(self._space_vp[self._space_control == FACTION_CP]))
+        return ap_total - cp_total
 
     # ──────────────────────────────────────────────────────────────────
     # Observation & mask builders

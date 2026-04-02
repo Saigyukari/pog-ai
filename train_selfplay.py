@@ -67,8 +67,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--total-games-played", type=int, default=0, help="Resume counter for search schedule staging.")
     args = parser.parse_args()
     args.bc_checkpoint = args.checkpoint_in or args.bc_checkpoint
-    if not args.bc_checkpoint:
-        parser.error("one of --bc-checkpoint or --checkpoint-in is required")
     if args.learner_batch_size is not None:
         args.batch_size = args.learner_batch_size
     return args
@@ -157,8 +155,8 @@ def get_search_params(total_games: int) -> tuple[int, int, float]:
 
 def main() -> int:
     args = parse_args()
-    checkpoint_path = Path(args.bc_checkpoint)
-    if not checkpoint_path.is_file():
+    checkpoint_path = Path(args.bc_checkpoint) if args.bc_checkpoint else None
+    if checkpoint_path is not None and not checkpoint_path.is_file():
         raise FileNotFoundError(f"BC checkpoint not found: {checkpoint_path}")
 
     n_local_devices = len(jax.local_devices())
@@ -169,7 +167,6 @@ def main() -> int:
 
     adj = load_adjacency_matrix(args.map_json)
     model = PoGNet(hidden_dim=128, n_gat_layers=6)
-    params = load_params(str(checkpoint_path))
     learner_state = create_train_state(
         rng=jax.random.PRNGKey(args.seed),
         model=model,
@@ -177,7 +174,10 @@ def main() -> int:
         dummy_cards=jnp.zeros((1, 7, 16), dtype=jnp.float32),
         adj=adj,
         learning_rate=args.lr,
-    ).replace(params=params)
+    )
+    if checkpoint_path is not None:
+        params = load_params(str(checkpoint_path))
+        learner_state = learner_state.replace(params=params)
 
     actor_params = learner_state.params
     learner_step = build_learner_step(model, adj)
@@ -310,7 +310,7 @@ def main() -> int:
                     "buffer_size": len(replay),
                     "learner_updates": learner_updates,
                     "total_games_played": total_games_played,
-                    "bc_checkpoint": str(checkpoint_path),
+                    "bc_checkpoint": str(checkpoint_path) if checkpoint_path is not None else None,
                 },
             )
             print(f"Saved checkpoint: {out}")

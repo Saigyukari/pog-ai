@@ -127,6 +127,9 @@ def _load_static_tables() -> dict[str, np.ndarray]:
     card_sr = []
     card_is_combat = []
     card_phase_gate = []
+    card_remove_after_event = []
+    card_reinf_count = []
+    card_vp_delta = []
     ap_physical_deck = []
     cp_physical_deck = []
     ap_unique_local = np.full((130,), -1, dtype=np.int16)
@@ -145,6 +148,14 @@ def _load_static_tables() -> dict[str, np.ndarray]:
             card_sr.append(entry.get("sr", 2))
             card_is_combat.append(bool(entry.get("is_combat_card", False)))
             card_phase_gate.append(PHASE_STR_MAP.get(entry.get("phase", "Either"), 2))
+            card_remove_after_event.append(bool(entry.get("remove_after_event", True)))
+            is_reinf = "reinforcement" in entry["name"].lower()
+            card_reinf_count.append(1 if is_reinf else 0)
+            name_lower = entry["name"].lower()
+            if "reichstag truce" in name_lower:
+                card_vp_delta.append(-1)
+            else:
+                card_vp_delta.append(0)
             if faction == FACTION_AP:
                 ap_unique_local[global_idx] = ap_unique_count
                 ap_unique_count += 1
@@ -172,6 +183,9 @@ def _load_static_tables() -> dict[str, np.ndarray]:
         "card_sr": np.array(card_sr, dtype=np.float32),
         "card_is_combat": np.array(card_is_combat, dtype=np.bool_),
         "card_phase_gate": np.array(card_phase_gate, dtype=np.int8),
+        "card_remove_after_event": np.array(card_remove_after_event, dtype=np.bool_),
+        "card_reinf_count": np.array(card_reinf_count, dtype=np.int8),
+        "card_vp_delta": np.array(card_vp_delta, dtype=np.int8),
         "ap_physical_deck": np.array(ap_physical_deck, dtype=np.int16),
         "cp_physical_deck": np.array(cp_physical_deck, dtype=np.int16),
         "ap_unique_local": ap_unique_local,
@@ -192,10 +206,15 @@ CARD_SR = jnp.asarray(_STATIC["card_sr"], dtype=jnp.float32)
 CARD_FACTION = jnp.asarray(_STATIC["card_faction"], dtype=jnp.int8)
 CARD_IS_COMBAT = jnp.asarray(_STATIC["card_is_combat"], dtype=jnp.bool_)
 CARD_PHASE_GATE = jnp.asarray(_STATIC["card_phase_gate"], dtype=jnp.int8)
+CARD_REMOVE_AFTER_EVENT = jnp.asarray(_STATIC["card_remove_after_event"], dtype=jnp.bool_)
+CARD_REINF_COUNT = jnp.asarray(_STATIC["card_reinf_count"], dtype=jnp.int8)
+CARD_VP_DELTA = jnp.asarray(_STATIC["card_vp_delta"], dtype=jnp.int8)
 AP_PHYSICAL_DECK = jnp.asarray(_STATIC["ap_physical_deck"], dtype=jnp.int16)
 CP_PHYSICAL_DECK = jnp.asarray(_STATIC["cp_physical_deck"], dtype=jnp.int16)
 AP_UNIQUE_LOCAL = jnp.asarray(_STATIC["ap_unique_local"], dtype=jnp.int16)
 CP_UNIQUE_LOCAL = jnp.asarray(_STATIC["cp_unique_local"], dtype=jnp.int16)
+AP_DECK_LOCAL_IDX = AP_UNIQUE_LOCAL[jnp.clip(AP_PHYSICAL_DECK, 0, AP_UNIQUE_LOCAL.shape[0] - 1)]
+CP_DECK_LOCAL_IDX = CP_UNIQUE_LOCAL[jnp.clip(CP_PHYSICAL_DECK, 0, CP_UNIQUE_LOCAL.shape[0] - 1)]
 
 UNIT_FACTION = UNIT_FACTION_INIT
 UNIT_TYPE = UNIT_TYPE_INIT
@@ -222,7 +241,8 @@ class JaxGameState(NamedTuple):
     turn: jnp.ndarray
     action_round: jnp.ndarray
     active_player: jnp.ndarray
-    war_status: jnp.ndarray
+    war_status_ap: jnp.ndarray
+    war_status_cp: jnp.ndarray
     vp: jnp.ndarray
     rng_key: jnp.ndarray
 
@@ -342,6 +362,28 @@ def _sample_hand(deck: jnp.ndarray, perm: jnp.ndarray, n_cards: int) -> tuple[jn
     return hand, remaining
 
 
+def _deal_hand_from_deck(
+    deck: jnp.ndarray,
+    discard_mask: jnp.ndarray,
+    rng_key: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    Draw HAND_SIZE cards from deck, skipping permanently removed cards.
+    """
+    local_idx = AP_DECK_LOCAL_IDX if deck.shape[0] == AP_PHYSICAL_DECK.shape[0] else CP_DECK_LOCAL_IDX
+    removed = discard_mask[jnp.clip(local_idx, 0, discard_mask.shape[0] - 1)]
+    available = jnp.where(
+        removed,
+        jnp.asarray(EMPTY_CARD, dtype=jnp.int16),
+        deck,
+    )
+    perm = jax.random.permutation(rng_key, deck.shape[0])
+    shuffled = available[perm]
+    order = jnp.argsort(shuffled == EMPTY_CARD, stable=True)
+    compacted = shuffled[order]
+    return compacted[:HAND_SIZE]
+
+
 @jax.jit
 def jax_reset(rng_key: jnp.ndarray) -> JaxGameState:
     ap_key, cp_key = jax.random.split(rng_key)
@@ -363,10 +405,13 @@ def jax_reset(rng_key: jnp.ndarray) -> JaxGameState:
         turn=jnp.asarray(1, dtype=jnp.int8),
         action_round=jnp.asarray(1, dtype=jnp.int8),
         active_player=jnp.asarray(FACTION_AP, dtype=jnp.int8),
-        war_status=jnp.asarray(PHASE_LIMITED, dtype=jnp.int8),
+        war_status_ap=jnp.asarray(PHASE_LIMITED, dtype=jnp.int8),
+        war_status_cp=jnp.asarray(PHASE_LIMITED, dtype=jnp.int8),
         vp=jnp.asarray(0, dtype=jnp.int8),
         rng_key=rng_key,
     )
+    initial_vp = _recompute_vp(SPACE_CONTROL)
+    state = state._replace(vp=initial_vp)
     return state._replace(oos_mask=jax_oos(state, FACTION_AP) | jax_oos(state, FACTION_CP))
 
 
@@ -384,6 +429,7 @@ def _has_assault_card(hand: jnp.ndarray) -> jnp.ndarray:
 def jax_legal_mask(state: JaxGameState) -> jnp.ndarray:
     player = state.active_player
     hand = _hand_for_player(state, player)
+    war_status = jax.lax.cond(player == FACTION_AP, lambda: state.war_status_ap, lambda: state.war_status_cp)
     legal = jnp.zeros((N_ACTIONS,), dtype=jnp.bool_).at[0].set(True)
 
     alive = (state.unit_loc < N_SPACES) & (state.unit_strength > 0)
@@ -406,8 +452,8 @@ def jax_legal_mask(state: JaxGameState) -> jnp.ndarray:
     def apply_card(mask, card_idx):
         valid = card_idx < CARD_PHASE_GATE.shape[0]
         phase_gate = jnp.where(valid, CARD_PHASE_GATE[jnp.clip(card_idx, 0, CARD_PHASE_GATE.shape[0] - 1)], 2)
-        phase_ok = valid & ~((phase_gate == PHASE_LIMITED) & (state.war_status == PHASE_TOTAL)) & ~(
-            (phase_gate == PHASE_TOTAL) & (state.war_status == PHASE_LIMITED)
+        phase_ok = valid & ~((phase_gate == PHASE_LIMITED) & (war_status == PHASE_TOTAL)) & ~(
+            (phase_gate == PHASE_TOTAL) & (war_status == PHASE_LIMITED)
         )
         event_idx = ACT_EVENT_START + card_idx
         move_idx = ACT_OPS_START + card_idx * 3
@@ -432,30 +478,98 @@ def jax_legal_mask(state: JaxGameState) -> jnp.ndarray:
     return legal
 
 
-def _remove_active_card(state: JaxGameState, card_idx: jnp.ndarray) -> JaxGameState:
+def _remove_active_card(
+    state: JaxGameState,
+    card_idx: jnp.ndarray,
+    permanent: jnp.ndarray,
+) -> JaxGameState:
     is_ap = state.active_player == FACTION_AP
     ap_hand = jax.lax.cond(is_ap, lambda: _remove_card_from_hand(state.ap_hand, card_idx), lambda: state.ap_hand)
     cp_hand = jax.lax.cond(~is_ap, lambda: _remove_card_from_hand(state.cp_hand, card_idx), lambda: state.cp_hand)
-    ap_discard = jax.lax.cond(
-        is_ap,
-        lambda: _mark_discard(state.ap_discard, AP_UNIQUE_LOCAL[jnp.clip(card_idx, 0, AP_UNIQUE_LOCAL.shape[0] - 1)]),
-        lambda: state.ap_discard,
+    local_ap = AP_UNIQUE_LOCAL[jnp.clip(card_idx, 0, AP_UNIQUE_LOCAL.shape[0] - 1)]
+    local_cp = CP_UNIQUE_LOCAL[jnp.clip(card_idx, 0, CP_UNIQUE_LOCAL.shape[0] - 1)]
+    ap_discard = jnp.where(
+        permanent & is_ap,
+        _mark_discard(state.ap_discard, local_ap),
+        state.ap_discard,
     )
-    cp_discard = jax.lax.cond(
-        ~is_ap,
-        lambda: _mark_discard(state.cp_discard, CP_UNIQUE_LOCAL[jnp.clip(card_idx, 0, CP_UNIQUE_LOCAL.shape[0] - 1)]),
-        lambda: state.cp_discard,
+    cp_discard = jnp.where(
+        permanent & ~is_ap,
+        _mark_discard(state.cp_discard, local_cp),
+        state.cp_discard,
     )
     return state._replace(ap_hand=ap_hand, cp_hand=cp_hand, ap_discard=ap_discard, cp_discard=cp_discard)
 
 
-def _advance_turn(state: JaxGameState) -> JaxGameState:
+def _advance_turn(state: JaxGameState, deal_key: jnp.ndarray) -> JaxGameState:
     next_action_round = state.action_round + jnp.asarray(1, dtype=jnp.int8)
     wrap = next_action_round > 7
     next_turn = state.turn + wrap.astype(jnp.int8)
-    next_action_round = jnp.where(wrap, 1, next_action_round)
+    next_action_round = jnp.where(wrap, jnp.asarray(1, dtype=jnp.int8), next_action_round)
     next_player = (1 - state.active_player).astype(jnp.int8)
-    return state._replace(turn=next_turn, action_round=next_action_round, active_player=next_player)
+
+    ap_key, cp_key = jax.random.split(deal_key)
+    new_ap_hand = _deal_hand_from_deck(AP_PHYSICAL_DECK, state.ap_discard, ap_key)
+    new_cp_hand = _deal_hand_from_deck(CP_PHYSICAL_DECK, state.cp_discard, cp_key)
+    ap_hand = jnp.where(wrap, new_ap_hand, state.ap_hand)
+    cp_hand = jnp.where(wrap, new_cp_hand, state.cp_hand)
+    new_war_status_ap = jnp.where(
+        wrap & (state.vp >= 5) & (state.war_status_ap == PHASE_LIMITED),
+        jnp.asarray(PHASE_TOTAL, dtype=jnp.int8),
+        state.war_status_ap,
+    )
+    new_war_status_cp = jnp.where(
+        wrap & (state.vp <= -5) & (state.war_status_cp == PHASE_LIMITED),
+        jnp.asarray(PHASE_TOTAL, dtype=jnp.int8),
+        state.war_status_cp,
+    )
+
+    return state._replace(
+        turn=next_turn,
+        action_round=next_action_round,
+        active_player=next_player,
+        ap_hand=ap_hand,
+        cp_hand=cp_hand,
+        war_status_ap=new_war_status_ap,
+        war_status_cp=new_war_status_cp,
+    )
+
+
+def _recompute_vp(control: jnp.ndarray) -> jnp.ndarray:
+    """
+    VP convention:
+      positive vp = AP is winning
+      negative vp = CP is winning
+    """
+    ap_total = jnp.sum(jnp.where(control == FACTION_AP, SPACE_VP, 0.0))
+    cp_total = jnp.sum(jnp.where(control == FACTION_CP, SPACE_VP, 0.0))
+    return jnp.clip(ap_total - cp_total, -127, 127).astype(jnp.int8)
+
+
+def _bring_units_on_map(
+    state: JaxGameState,
+    faction: jnp.ndarray,
+    n: jnp.ndarray,
+) -> JaxGameState:
+    """
+    Move up to n OFFBOARD units of faction to the first friendly source space.
+    """
+    source_mask = jnp.where(faction == FACTION_AP, AP_SOURCE_MASK, CP_SOURCE_MASK)
+    first_source = jnp.argmax(source_mask & (state.control == faction))
+
+    def bring_one(i, unit_loc):
+        is_candidate = (UNIT_FACTION == faction) & (unit_loc == OFFBOARD)
+        unit_idx = jnp.argmax(is_candidate.astype(jnp.int32))
+        has_candidate = jnp.any(is_candidate)
+        return jax.lax.cond(
+            has_candidate & (i < n),
+            lambda loc: loc.at[unit_idx].set(first_source.astype(loc.dtype)),
+            lambda loc: loc,
+            unit_loc,
+        )
+
+    new_unit_loc = jax.lax.fori_loop(0, 4, bring_one, state.unit_loc)
+    return state._replace(unit_loc=new_unit_loc)
 
 
 def _first_unit_at(state: JaxGameState, player: jnp.ndarray, src: jnp.ndarray) -> jnp.ndarray:
@@ -499,7 +613,8 @@ def _combat_step(state: JaxGameState, src: jnp.ndarray, tgt: jnp.ndarray, rng_ke
     unit_loc = jax.lax.cond(~def_lost_all, lambda loc: eliminate_some(loc, def_sorted, crt.defender_losses), lambda loc: loc, unit_loc)
     unit_strength = jnp.where(unit_loc == OFFBOARD, 0, unit_strength)
     control = jnp.where(def_lost_all, state.control.at[tgt].set(player), state.control)
-    return state._replace(unit_loc=unit_loc, unit_strength=unit_strength, control=control)
+    new_vp = _recompute_vp(control)
+    return state._replace(unit_loc=unit_loc, unit_strength=unit_strength, control=control, vp=new_vp)
 
 
 def _move_step(state: JaxGameState, src: jnp.ndarray, tgt: jnp.ndarray, rng_key: jnp.ndarray) -> JaxGameState:
@@ -518,25 +633,45 @@ def _move_step(state: JaxGameState, src: jnp.ndarray, tgt: jnp.ndarray, rng_key:
             s.unit_loc,
         )
         control = s.control.at[tgt].set(player)
-        return s._replace(unit_loc=unit_loc, control=control)
+        new_vp = _recompute_vp(control)
+        return s._replace(unit_loc=unit_loc, control=control, vp=new_vp)
 
     return jax.lax.cond(enemy_present, do_combat, do_move, state)
 
 
 @jax.jit
 def jax_step(state: JaxGameState, action: jnp.ndarray) -> tuple[JaxGameState, jnp.ndarray, jnp.ndarray]:
-    key, step_key = jax.random.split(state.rng_key)
+    key, step_key, deal_key = jax.random.split(state.rng_key, 3)
 
     def do_pass(s):
         return s
 
     def do_event(s):
-        card_idx = action - ACT_EVENT_START
-        return _remove_active_card(s, card_idx.astype(jnp.int16))
+        card_idx = (action - ACT_EVENT_START).astype(jnp.int16)
+        clamped = jnp.clip(card_idx, 0, CARD_REMOVE_AFTER_EVENT.shape[0] - 1)
+        permanent = CARD_REMOVE_AFTER_EVENT[clamped]
+        s = _remove_active_card(s, card_idx, permanent)
+        n_reinf = CARD_REINF_COUNT[clamped].astype(jnp.int8)
+        s = jax.lax.cond(
+            n_reinf > 0,
+            lambda st: _bring_units_on_map(st, st.active_player, n_reinf),
+            lambda st: st,
+            s,
+        )
+        delta = CARD_VP_DELTA[clamped].astype(jnp.int8)
+        s = s._replace(vp=jnp.clip(s.vp + delta, -127, 127).astype(jnp.int8))
+        return s
 
     def do_ops(s):
         card_idx = ((action - ACT_OPS_START) // 3).astype(jnp.int16)
-        return _remove_active_card(s, card_idx)
+        sub_type = ((action - ACT_OPS_START) % 3).astype(jnp.int32)
+        s = _remove_active_card(s, card_idx, jnp.asarray(False, dtype=jnp.bool_))
+        return jax.lax.cond(
+            sub_type == 2,
+            lambda st: _bring_units_on_map(st, st.active_player, jnp.asarray(1, dtype=jnp.int8)),
+            lambda st: st,
+            s,
+        )
 
     def do_move(s):
         offset = action - ACT_MOVE_START
@@ -555,12 +690,20 @@ def jax_step(state: JaxGameState, action: jnp.ndarray) -> tuple[JaxGameState, jn
         ),
         state,
     )
-    state = _advance_turn(state)._replace(rng_key=key)
+    state = _advance_turn(state, deal_key)._replace(rng_key=key)
     oos = jax_oos(state, FACTION_AP) | jax_oos(state, FACTION_CP)
     state = state._replace(oos_mask=oos)
 
     done = (jnp.abs(state.vp) >= 20) | (state.turn > 20)
-    reward = jnp.asarray(0.0, dtype=jnp.float32)
+    ap_wins = state.vp > 0
+    cp_wins = state.vp < 0
+    active_is_ap = state.active_player == FACTION_AP
+    player_wins = (ap_wins & active_is_ap) | (cp_wins & ~active_is_ap)
+    reward = jnp.where(
+        done,
+        jnp.where(player_wins, 1.0, jnp.where(state.vp == 0, 0.0, -1.0)),
+        0.0,
+    ).astype(jnp.float32)
     return state, reward, done
 
 
@@ -599,8 +742,8 @@ def jax_obs(state: JaxGameState, player: int) -> tuple[jnp.ndarray, jnp.ndarray]
     obs = obs.at[26].set(jnp.where(jnp.any(ap_valid), jnp.sum(ap_ops) / jnp.sum(ap_valid) / 5.0, 0.0))
     obs = obs.at[27].set(jnp.where(jnp.any(cp_valid), jnp.sum(cp_ops) / jnp.sum(cp_valid) / 5.0, 0.0))
     obs = obs.at[28].set((state.vp.astype(jnp.float32) + 20.0) / 40.0)
-    obs = obs.at[29].set((state.war_status == PHASE_TOTAL).astype(jnp.float32))
-    obs = obs.at[30].set((state.war_status == PHASE_TOTAL).astype(jnp.float32))
+    obs = obs.at[29].set((state.war_status_ap == PHASE_TOTAL).astype(jnp.float32))
+    obs = obs.at[30].set((state.war_status_cp == PHASE_TOTAL).astype(jnp.float32))
     obs = obs.at[31].set((state.active_player == FACTION_CP).astype(jnp.float32))
 
     hand = jax.lax.cond(player == FACTION_AP, lambda: state.ap_hand, lambda: state.cp_hand)
