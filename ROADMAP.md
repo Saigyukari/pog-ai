@@ -16,7 +16,7 @@ Phase 3 — RL Self-Play      ████████████████�
 Phase 4 — Evaluation        ████████████████████  DONE (eval/tournament.py)
 Phase 5 — Human Interface   ████████████████████  DONE (play.py)
 Phase 6 — Board Init        ████████████████████  DONE (starting_positions.py, VP tracking, terminal reward)
-Phase 7 — Card Mechanics    ████████░░░░░░░░░░░░  Task 7.1 DONE; Task 7.2 assigned (war status)
+Phase 7 — Card Mechanics    ████████░░░░░░░░░░░░  7.1+7.2 DONE; 7.3–7.5 assigned (see below)
 ```
 
 ---
@@ -286,16 +286,43 @@ Both `jax_env.py` and `pog_env.py` patched. `jax_legal_mask` now returns MOVE_UN
 
 `_deal_hand_from_deck` added; `_advance_turn(state, deal_key)` re-deals both hands at `wrap=True`. `war_status` also split into `war_status_ap`/`war_status_cp` (bonus). `pog_env.py` VP sign convention aligned. 58/58 tests pass.
 
-### Task 7.2 — War status advancement at turn boundary  ← CURRENT TASK FOR GPT
+### Task 7.2 — War status advancement at turn boundary  ✅ DONE
 
-**Problem:** `war_status_ap` and `war_status_cp` are initialised to `PHASE_LIMITED` and never change. ~30–40% of the card deck (Total War cards) is permanently locked for the entire game, so the policy never learns card selection strategy for that portion of the deck.
+VP-threshold advancement added to `_advance_turn`. Total War cards now unlock mid-game. 4 tests pass.
 
-**Fix:** In `_advance_turn`, after the hand re-deal block, add VP-threshold checks:
-- `vp >= +5` at turn boundary → advance `war_status_ap` to `PHASE_TOTAL`
-- `vp <= -5` at turn boundary → advance `war_status_cp` to `PHASE_TOTAL`
-- One-way: never regresses to Limited once Total
+### Task 7.3 — Fix permanent-discard bug for reusable cards  ← CURRENT TASK
 
-See `claude2gpt.md` for the exact code and test spec.
+**Problem (correctness bug):** `_remove_active_card` always writes to `ap_discard`/
+`cp_discard`, permanently removing cards from the deck even when played for OPS.
+Only 105/141 cards are `remove_after_event=True`; the other 36 are reusable and
+should return to the draw pile. After a few turns the deck degrades to ~30 cards.
+
+**Fix:** Add `CARD_REMOVE_AFTER_EVENT` static array; pass `permanent` bool to
+`_remove_active_card`; OPS play always passes `permanent=False`.
+See `claude2gpt.md` for exact code.
+
+### Task 7.4 — Reinforcement card events bring units on-map
+
+**Problem:** 177/194 units are OFFBOARD forever. 31 reinforcement cards exist but
+`do_event` just removes them. Corps and late-war units never enter the game.
+
+**Fix:** Add `CARD_REINF_COUNT` static array; add `_bring_units_on_map` helper;
+update `do_event` to call it when `CARD_REINF_COUNT[card_idx] > 0`.
+Depends on Task 7.3. See `claude2gpt.md` for exact code.
+
+### Task 7.5 — SR subtype routes unit to source space
+
+**Problem:** OPS sub-type 2 (SR action) is treated identically to move/attack —
+card removed, nothing else happens. SR should move one unit to a source space.
+
+**Fix:** Route on `(action - ACT_OPS_START) % 3`; sub-type 2 calls
+`_bring_units_on_map`. Reuses helper from Task 7.4.
+Depends on Task 7.4. See `claude2gpt.md` for exact code.
+
+### Task 7.6 — Trench construction via OPS  (low priority, defer)
+
+Not critical for training quality. Trench levels stay 0 in self-play;
+attacker/defender odds are still meaningful at level 0.
 
 ---
 
