@@ -16,7 +16,7 @@ Phase 3 — RL Self-Play      ████████████████�
 Phase 4 — Evaluation        ████████████████████  DONE (eval/tournament.py)
 Phase 5 — Human Interface   ████████████████████  DONE (play.py)
 Phase 6 — Board Init        ████████████████████  DONE (starting_positions.py, VP tracking, terminal reward)
-Phase 7 — Card Mechanics    ░░░░░░░░░░░░░░░░░░░░  Task 7.1 assigned (card re-deal)
+Phase 7 — Card Mechanics    ████████░░░░░░░░░░░░  Task 7.1 DONE; Task 7.2 assigned (war status)
 ```
 
 ---
@@ -282,9 +282,20 @@ Both `jax_env.py` and `pog_env.py` patched. `jax_legal_mask` now returns MOVE_UN
 
 **Problem:** Cards are dealt at reset but never re-dealt. By turn 2 both players have empty hands. For 19 of 20 turns only movement actions are legal. Since card selection is PoG's primary strategic decision, self-play learns almost nothing useful.
 
-### Task 7.1 — Card re-deal at turn boundary  ← CURRENT TASK FOR GPT
+### Task 7.1 — Card re-deal at turn boundary  ✅ DONE
 
-See `claude2gpt.md` for the full spec.
+`_deal_hand_from_deck` added; `_advance_turn(state, deal_key)` re-deals both hands at `wrap=True`. `war_status` also split into `war_status_ap`/`war_status_cp` (bonus). `pog_env.py` VP sign convention aligned. 58/58 tests pass.
+
+### Task 7.2 — War status advancement at turn boundary  ← CURRENT TASK FOR GPT
+
+**Problem:** `war_status_ap` and `war_status_cp` are initialised to `PHASE_LIMITED` and never change. ~30–40% of the card deck (Total War cards) is permanently locked for the entire game, so the policy never learns card selection strategy for that portion of the deck.
+
+**Fix:** In `_advance_turn`, after the hand re-deal block, add VP-threshold checks:
+- `vp >= +5` at turn boundary → advance `war_status_ap` to `PHASE_TOTAL`
+- `vp <= -5` at turn boundary → advance `war_status_cp` to `PHASE_TOTAL`
+- One-way: never regresses to Limited once Total
+
+See `claude2gpt.md` for the exact code and test spec.
 
 ---
 
