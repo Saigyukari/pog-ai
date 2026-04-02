@@ -16,7 +16,8 @@ Phase 3 — RL Self-Play      ████████████████�
 Phase 4 — Evaluation        ████████████████████  DONE (eval/tournament.py)
 Phase 5 — Human Interface   ████████████████████  DONE (play.py)
 Phase 6 — Board Init        ████████████████████  DONE (starting_positions.py, VP tracking, terminal reward)
-Phase 7 — Card Mechanics    ████████░░░░░░░░░░░░  7.1+7.2 DONE; 7.3–7.5 assigned (see below)
+Phase 7 — Card Mechanics    ████████████████░░░░  7.1–7.5 DONE; 7.6–7.8 assigned (see below)
+Phase 8 — Pipeline Verify   ░░░░░░░░░░░░░░░░░░░░  Task 7.7 smoke test; then BC results
 ```
 
 ---
@@ -290,7 +291,49 @@ Both `jax_env.py` and `pog_env.py` patched. `jax_legal_mask` now returns MOVE_UN
 
 VP-threshold advancement added to `_advance_turn`. Total War cards now unlock mid-game. 4 tests pass.
 
-### Task 7.3 — Fix permanent-discard bug for reusable cards  ← CURRENT TASK
+### Task 7.3 — Fix permanent-discard bug for reusable cards  ✅ DONE
+
+`CARD_REMOVE_AFTER_EVENT` static array added. `_remove_active_card` takes `permanent` bool.
+OPS play never permanently discards. `tests/test_discard_fix.py` passes.
+
+### Task 7.4 — Reinforcement card events bring units on-map  ✅ DONE
+
+`CARD_REINF_COUNT` static array (31 cards). `_bring_units_on_map` helper.
+`do_event` triggers reinforcement. `tests/test_reinforcement_event.py` passes.
+
+### Task 7.5 — SR subtype routes unit to source space  ✅ DONE
+
+OPS sub-type 2 calls `_bring_units_on_map`. `tests/test_sr_event.py` passes.
+66/66 tests pass. vmap self-play step verified.
+
+### Task 7.6 — Align `pog_env.py` with `jax_env.py`  ← CURRENT TASK FOR GPT
+
+**Problem:** `pog_env.py` (used by `eval/tournament.py` and `play.py`) has three
+gaps vs `jax_env.py`:
+1. Deck never reshuffles — reusable cards lost after first play
+2. `_play_event` stub — reinforcement cards don't bring units on map
+3. `_play_ops` stub — SR (op_type==2) does nothing
+
+See `claude2gpt.md` for exact code and tests.
+
+### Task 7.7 — End-to-end self-play smoke test  (after 7.6)
+
+Run `train_selfplay.py` for 1 iteration with n_actors=2, batch=16, no BC checkpoint.
+Catches integration bugs introduced by all the JaxGameState changes.
+See `claude2gpt.md` for test spec.
+
+### Task 7.8 — CARD_VP_DELTA: VP-adjusting card events  (low priority)
+
+Add `bonus_vp` field to JaxGameState + CARD_VP_DELTA static array.
+Implement ±1 VP effects for simple event cards (Reichstag Truce, Rape of Belgium).
+Defer until after 7.6 + 7.7. See `claude2gpt.md` for deferred spec.
+
+### Task 7.6 (trench construction) — PERMANENTLY DEFERRED
+
+No concrete rule spec available. Trench levels stay at 0 in self-play.
+Attacker/defender odds remain meaningful at level 0.
+
+### CURRENT TASK
 
 **Problem (correctness bug):** `_remove_active_card` always writes to `ap_discard`/
 `cp_discard`, permanently removing cards from the deck even when played for OPS.
