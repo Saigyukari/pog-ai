@@ -27,6 +27,26 @@ from src.env.pog_env import FACTION_AP, PogEnv
 from src.rl.mcts import MCTS
 from src.rl.network import PoGNet, load_adjacency_matrix
 
+N_ACTIONS = 5341
+
+
+def _greedy_action(env: PogEnv, agent: "AgentSpec", legal: np.ndarray, infer_fn) -> int:
+    """Single JIT'd forward pass — no MCTS, no deepcopy. ~50x faster than MCTS."""
+    obs = env._build_spatial_obs()
+    card_ctx = env._build_card_context(env.active_player)
+    heads, _ = infer_fn(agent.params, jnp.array(obs), jnp.array(card_ctx))
+    card_l, atype_l, src_l, tgt_l = [np.array(h[0]) for h in heads]
+
+    scores = np.full(N_ACTIONS, -1e9, dtype=np.float32)
+    scores[0] = 0.0
+    scores[1:111] = card_l + atype_l[0]
+    ops = (card_l[:, None] + atype_l[None, :]).reshape(-1)
+    scores[111:441] = ops[:330]
+    moves = (src_l[:, None] + tgt_l[None, :]).reshape(-1)
+    scores[441:] = moves[: N_ACTIONS - 441]
+    scores[~legal] = -1e9
+    return int(np.argmax(scores))
+
 
 @dataclass
 class AgentSpec:
@@ -39,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run checkpoint round-robin evaluation.")
     parser.add_argument("checkpoints", nargs="+", help="Checkpoint .pkl files or directories containing them.")
     parser.add_argument("--games", type=int, default=200, help="Games per pairing.")
-    parser.add_argument("--mcts-sims", type=int, default=32, help="CPU MCTS simulations per move.")
+    parser.add_argument("--mcts-sims", type=int, default=0, help="MCTS simulations per move. 0=greedy (fastest).")
     parser.add_argument("--map", dest="map_json", default="pog_map_graph.json", help="Board graph path.")
     parser.add_argument("--cards", dest="cards_json", default="pog_cards_db.json", help="Card db path.")
     parser.add_argument("--results-csv", default="eval/results.csv", help="CSV output path.")
@@ -73,7 +93,8 @@ def load_agent(path: Path) -> AgentSpec:
     return AgentSpec(name=path.stem, kind="model", params=payload["params"])
 
 
-def choose_action(env: PogEnv, agent: AgentSpec, model: PoGNet, adj: jnp.ndarray, mcts_sims: int, rng_seed: int) -> int:
+def choose_action(env: PogEnv, agent: AgentSpec, model: PoGNet, adj: jnp.ndarray,
+                  mcts_sims: int, rng_seed: int, infer_fn=None) -> int:
     active_name = env._agent_name(env.active_player)
     legal = env.action_mask(active_name)
     legal_idx = np.flatnonzero(legal)
@@ -83,6 +104,9 @@ def choose_action(env: PogEnv, agent: AgentSpec, model: PoGNet, adj: jnp.ndarray
     if agent.kind == "random":
         return int(np.random.default_rng(rng_seed).choice(legal_idx))
 
+    if mcts_sims == 0 and infer_fn is not None:
+        return _greedy_action(env, agent, legal, infer_fn)
+
     mcts = MCTS(model=model, params=agent.params, adj=adj, n_simulations=mcts_sims, depth_limit=4, temperature=0.0)
     policy = mcts.search(env, jax.random.PRNGKey(rng_seed))
     action = int(np.argmax(policy))
@@ -91,13 +115,14 @@ def choose_action(env: PogEnv, agent: AgentSpec, model: PoGNet, adj: jnp.ndarray
     return action
 
 
-def play_game(ap_agent: AgentSpec, cp_agent: AgentSpec, model: PoGNet, adj: jnp.ndarray, args: argparse.Namespace, seed: int) -> int:
+def play_game(ap_agent: AgentSpec, cp_agent: AgentSpec, model: PoGNet, adj: jnp.ndarray,
+              args: argparse.Namespace, seed: int, infer_fn=None) -> int:
     env = PogEnv(args.map_json, args.cards_json)
     env.reset(seed=seed)
 
     for ply in range(256):
         active_agent = ap_agent if env.active_player == FACTION_AP else cp_agent
-        action = choose_action(env, active_agent, model, adj, args.mcts_sims, seed + ply)
+        action = choose_action(env, active_agent, model, adj, args.mcts_sims, seed + ply, infer_fn)
         _, reward, done, _, _ = env.step(action)
         if any(done.values()):
             if reward["AP"] > reward["CP"]:
@@ -145,6 +170,13 @@ def main() -> int:
     model = PoGNet(hidden_dim=128, n_gat_layers=6)
     adj = load_adjacency_matrix(args.map_json)
 
+    # Build a single JIT'd inference function shared across all games.
+    # Compiled once on first call; subsequent calls hit the cache.
+    @jax.jit
+    def infer_fn(params, obs, card_ctx):
+        heads, val = model.apply(params, obs[None], card_ctx[None], adj)
+        return heads, val
+
     ratings = {agent.name: 0.0 for agent in agents}
     if "random" in ratings:
         ratings["random"] = 0.0
@@ -163,7 +195,7 @@ def main() -> int:
                 swap = game_idx % 2 == 1
                 ap_agent = agent_b if swap else agent_a
                 cp_agent = agent_a if swap else agent_b
-                result = play_game(ap_agent, cp_agent, model, adj, args, seed + game_idx)
+                result = play_game(ap_agent, cp_agent, model, adj, args, seed + game_idx, infer_fn)
                 score_for_a = 0.5
                 if result == 1:
                     winner = ap_agent.name
