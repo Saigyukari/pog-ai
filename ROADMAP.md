@@ -16,8 +16,8 @@ Phase 3 — RL Self-Play      ████████████████�
 Phase 4 — Evaluation        ████████████████████  DONE (eval/tournament.py)
 Phase 5 — Human Interface   ████████████████████  DONE (play.py)
 Phase 6 — Board Init        ████████████████████  DONE (starting_positions.py, VP tracking, terminal reward)
-Phase 7 — Card Mechanics    ████████████████░░░░  7.1–7.5 DONE; 7.6–7.8 assigned (see below)
-Phase 8 — Pipeline Verify   ░░░░░░░░░░░░░░░░░░░░  Task 7.7 smoke test; then BC results
+Phase 7 — Card Mechanics    ██████████████████░░  7.1–7.7 DONE; 7.8 assigned (CARD_VP_DELTA)
+Phase 8 — RL Training       ░░░░░░░░░░░░░░░░░░░░  Blocked on BC checkpoint + more data
 ```
 
 ---
@@ -306,7 +306,28 @@ OPS play never permanently discards. `tests/test_discard_fix.py` passes.
 OPS sub-type 2 calls `_bring_units_on_map`. `tests/test_sr_event.py` passes.
 66/66 tests pass. vmap self-play step verified.
 
-### Task 7.6 — Align `pog_env.py` with `jax_env.py`  ← CURRENT TASK FOR GPT
+### Task 7.6 — Align `pog_env.py` with `jax_env.py`  ✅ DONE
+
+OPS-played cards reshuffle at turn wrap; permanent discard respects `remove_after_event`;
+reinforcement events bring units on map; SR brings unit to source space.
+`tests/test_pog_env_alignment.py` passes.
+
+### Task 7.7 — Self-play smoke test  ✅ DONE
+
+Cold-start (no BC checkpoint): `loss=5.3199`, `policy=0.6384`, `value=2.9483` — finite.
+Checkpoint written. 70/70 tests pass.
+
+### Task 7.8 — CARD_VP_DELTA: VP-adjusting event cards  ← CURRENT TASK FOR GPT
+
+**Problem:** Cards that give an immediate VP adjustment are still no-ops in `do_event`.
+Reichstag Truce (CP) is the only clear unconditional case: "Add 1 VP" → delta = −1
+in our convention (positive = AP winning). All other VP cards have per-turn
+accumulation or prerequisites — leave them at delta = 0 for now.
+
+**Fix (no schema change):** Add `CARD_VP_DELTA` static array; apply `state.vp + delta`
+at end of `do_event`. See `claude2gpt.md` for exact code and test.
+
+### Task 7.6 (trench construction) — PERMANENTLY DEFERRED
 
 **Problem:** `pog_env.py` (used by `eval/tournament.py` and `play.py`) has three
 gaps vs `jax_env.py`:
@@ -316,24 +337,35 @@ gaps vs `jax_env.py`:
 
 See `claude2gpt.md` for exact code and tests.
 
-### Task 7.7 — End-to-end self-play smoke test  (after 7.6)
+### Phase 8 — RL Training (blocked on BC + data)
 
-Run `train_selfplay.py` for 1 iteration with n_actors=2, batch=16, no BC checkpoint.
-Catches integration bugs introduced by all the JaxGameState changes.
-See `claude2gpt.md` for test spec.
+After Task 7.8, simulation is engineering-complete. Remaining steps:
 
-### Task 7.8 — CARD_VP_DELTA: VP-adjusting card events  (low priority)
+1. **Get more BC data** (user action):
+   ```bash
+   python scrape_rtt_expert.py          # scrape RTT server
+   python src/data/rtt_parser.py data/rtt_games/ --output data/training/expert_games.jsonl
+   ```
+   Target ≥ 2 000 records (current: ~195 — BC overfits badly at 195).
 
-Add `bonus_vp` field to JaxGameState + CARD_VP_DELTA static array.
-Implement ±1 VP effects for simple event cards (Reichstag Truce, Rape of Belgium).
-Defer until after 7.6 + 7.7. See `claude2gpt.md` for deferred spec.
+2. **Wait for cluster BC checkpoint** (`checkpoints/bc/epoch_010.pkl`)
 
-### Task 7.6 (trench construction) — PERMANENTLY DEFERRED
+3. **Run self-play on cluster**:
+   ```bash
+   python train_selfplay.py --bc-checkpoint checkpoints/bc/epoch_010.pkl \
+     --n-actors 256 --buffer-capacity 500000 --batch-size 2048 --iterations 500
+   ```
 
-No concrete rule spec available. Trench levels stay at 0 in self-play.
-Attacker/defender odds remain meaningful at level 0.
+4. **Evaluate**:
+   ```bash
+   python eval/tournament.py checkpoints/rl/ --include-random --games 100
+   ```
+   Target Elo: +200 (BC-level), +400 (beginner human), +700 (club-level).
 
-### CURRENT TASK
+5. **Play locally on RTX 5060**:
+   ```bash
+   python play.py --checkpoint checkpoints/rl/iter_500.pkl --side AP
+   ```
 
 **Problem (correctness bug):** `_remove_active_card` always writes to `ap_discard`/
 `cp_discard`, permanently removing cards from the deck even when played for OPS.

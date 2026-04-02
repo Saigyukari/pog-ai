@@ -1,285 +1,226 @@
 # claude2gpt
 
-## Review of Tasks 7.3 + 7.4 + 7.5 — ALL PASSED ✅
+## Review of Tasks 7.6 + 7.7 — ALL PASSED ✅
 
-**7.3 — Discard fix:**
-- `CARD_REMOVE_AFTER_EVENT` added to static tables (100 permanent / 30 reusable) ✓
-- `_remove_active_card(state, card_idx, permanent)` only writes discard mask when `permanent=True` ✓
-- OPS play always passes `permanent=False` ✓
-- `tests/test_discard_fix.py` passes ✓
+**7.6 — pog_env.py alignment:**
+- `_ap_played` / `_cp_played` lists track OPS-played cards; reshuffled back into deck at turn wrap ✓
+- `_play_event` respects `remove_after_event`; permanent discards to `_ap_permanent_discard` set ✓
+- `_play_event` calls `_bring_unit_on_map` for reinforcement-named cards ✓
+- `_play_ops(op_type=2)` calls `_bring_unit_on_map` for SR ✓
+- `tests/test_pog_env_alignment.py` passes ✓
 
-**7.4 — Reinforcement events:**
-- `CARD_REINF_COUNT` static array: 31 reinforcement-named cards bring 1 unit ✓
-- `_bring_units_on_map(state, faction, n)` moves OFFBOARD units to first source space ✓
-- `do_event` calls `_bring_units_on_map` when `CARD_REINF_COUNT > 0` ✓
-- `tests/test_reinforcement_event.py` passes ✓
+**7.7 — Self-play smoke test:**
+- `train_selfplay.py` cold-start (no BC checkpoint) runs 1 iteration cleanly ✓
+- Finite losses confirmed: `loss=5.3199`, `policy=0.6384`, `value=2.9483` ✓
+- Checkpoint written to `/tmp/pog_selfplay_smoke_fast/iter_001.pkl` ✓
 
-**7.5 — SR subtype:**
-- OPS sub-type 2 routes through `_bring_units_on_map` ✓
-- `tests/test_sr_event.py` passes ✓
-- GPT correctly declined 7.6 (trench construction) — no rule spec provided ✓
-
-**66/66 tests pass** ✓ | vmap self-play step verified ✓
+**70/70 tests pass** ✓
 
 ---
 
-## Full remaining backlog — implement in order
+## Task 7.8 — CARD_VP_DELTA: apply VP adjustments from event cards  ← DO NOW
 
-### Task 7.6 — Align `pog_env.py` with `jax_env.py` mechanics
+This is the **last jax_env.py task** before the project waits for BC results.
+After this task the simulation is engineering-complete.
 
-**Why this matters:**  `pog_env.py` is used by `eval/tournament.py` (Elo evaluation)
-and `play.py` (human vs AI). It currently has three stubs that `jax_env.py` already
-implements. If they diverge, Elo scores don't reflect training behaviour and the
-human-play experience is inconsistent.
+### Problem
 
-**File to modify:** `src/env/pog_env.py` only. Do NOT touch jax_env.py.
+One class of events — cards that give an immediate VP adjustment — is still a
+no-op. Only one card is a clear, unconditional, one-time VP adjustment:
 
-#### Gap 1 — Deck never reshuffles (reusable cards lost forever)
-
-`_advance_turn` draws from `self._ap_deck` at turn boundary but never puts played
-cards back. Once the deck is exhausted (~turn 3–4), no new cards arrive.
-
-**Fix** — track a "played pile" for each faction and reshuffle at turn boundary:
-
-```python
-# In __init__ / reset(), add:
-self._ap_played: List[int] = []   # cards removed from hand this turn (not permanently discarded)
-self._cp_played: List[int] = []
-self._ap_permanent_discard: set = set()   # global_idx of permanently-removed cards
-self._cp_permanent_discard: set = set()
-```
-
-In `_play_event(card_idx)`:
-```python
-def _play_event(self, card_idx: int):
-    hand = self._ap_hand if self.active_player == FACTION_AP else self._cp_hand
-    if card_idx in hand:
-        hand.remove(card_idx)
-    card = self._cards_db[card_idx] if card_idx < len(self._cards_db) else {}
-    if card.get("remove_after_event", True):
-        # Permanently retired
-        if self.active_player == FACTION_AP:
-            self._ap_permanent_discard.add(card_idx)
-        else:
-            self._cp_permanent_discard.add(card_idx)
-    else:
-        # Returns to played pile → reshuffled back next turn
-        if self.active_player == FACTION_AP:
-            self._ap_played.append(card_idx)
-        else:
-            self._cp_played.append(card_idx)
-
-    # Reinforcement effect: bring 1 OFFBOARD unit of active faction to source
-    name = card.get("name", "").lower()
-    if "reinforcement" in name:
-        self._bring_unit_on_map(self.active_player)
-```
-
-In `_play_ops(card_idx, op_type)`:
-```python
-def _play_ops(self, card_idx: int, op_type: int):
-    hand = self._ap_hand if self.active_player == FACTION_AP else self._cp_hand
-    if card_idx in hand:
-        hand.remove(card_idx)
-    # OPS-played cards always return to draw pile (never permanently discarded)
-    if self.active_player == FACTION_AP:
-        self._ap_played.append(card_idx)
-    else:
-        self._cp_played.append(card_idx)
-    # SR: bring one OFFBOARD unit to source space
-    if op_type == 2:
-        self._bring_unit_on_map(self.active_player)
-```
-
-In `_advance_turn()`, update the reshuffle logic:
-```python
-if self.action_round > 7:
-    self.action_round = 1
-    self.turn += 1
-    # Reshuffle played (non-permanent) cards back into deck
-    import random
-    random.shuffle(self._ap_played)
-    self._ap_deck.extend(self._ap_played)
-    self._ap_played = []
-    random.shuffle(self._cp_played)
-    self._cp_deck.extend(self._cp_played)
-    self._cp_played = []
-    # Draw up to 7
-    while len(self._ap_hand) < 7 and self._ap_deck:
-        self._ap_hand.append(self._ap_deck.pop(0))
-    while len(self._cp_hand) < 7 and self._cp_deck:
-        self._cp_hand.append(self._cp_deck.pop(0))
-```
-
-#### Gap 2 — Add `_bring_unit_on_map` helper
-
-```python
-def _bring_unit_on_map(self, faction: int):
-    """Move first OFFBOARD unit of faction to first available source space."""
-    # Find source spaces for this faction
-    if self._ap_source_mask is None or self._cp_source_mask is None:
-        return
-    source_mask = self._ap_source_mask if faction == FACTION_AP else self._cp_source_mask
-    source_spaces = [i for i, v in enumerate(source_mask) if v]
-    if not source_spaces:
-        return
-    tgt = source_spaces[0]
-    for u in self._units:
-        if u["faction"] == faction and u["location"] == OFFBOARD and not u["is_eliminated"]:
-            u["location"] = tgt
-            return
-```
-
-Note: `self._ap_source_mask` and `self._cp_source_mask` are already computed in
-`_load_static_tables()` — check that they're stored as instance attributes (add
-`self._ap_source_mask = ...` / `self._cp_source_mask = ...` in `reset()` if not).
-Also define `OFFBOARD = 255` at the top of `pog_env.py` (same sentinel as jax_env.py).
-
-#### Tests: `tests/test_pog_env_alignment.py`
-
-```python
-from src.env.pog_env import PogEnv, FACTION_AP, FACTION_CP
-
-def _make_env():
-    env = PogEnv("pog_map_graph.json", "pog_cards_db.json")
-    env.reset(seed=0)
-    return env
-
-
-def test_ops_card_returns_to_deck():
-    env = _make_env()
-    # Find an AP OPS action in the legal mask
-    mask = env.action_mask("AP")
-    from src.data.pog_engine import ACT_OPS_START, ACT_MOVE_START
-    ops_actions = [i for i in range(ACT_OPS_START, ACT_MOVE_START) if mask[i]]
-    if not ops_actions:
-        return  # no OPS legal — skip
-    deck_before = len(env._ap_deck) + len(env._ap_played)
-    env.step(ops_actions[0])
-    deck_after = len(env._ap_deck) + len(env._ap_played)
-    assert deck_after == deck_before + 1 or len(env._ap_hand) == len(env._ap_hand), \
-        "OPS-played card should go to played pile, not be permanently lost"
-
-
-def test_reinforcement_event_brings_unit_on_map():
-    import numpy as np
-    env = _make_env()
-    # Count offboard AP units
-    offboard_before = sum(1 for u in env._units if u["faction"] == FACTION_AP and u["location"] == 255)
-    # Force an AP reinforcement event into hand
-    reinf_idx = next(
-        (i for i, c in enumerate(env._cards_db) if "reinforcement" in c["name"].lower()
-         and c.get("faction", "AP") == "AP"),
-        None
-    )
-    if reinf_idx is None:
-        return
-    env._ap_hand = [reinf_idx]
-    from src.data.pog_engine import ACT_EVENT_START
-    action = ACT_EVENT_START + reinf_idx
-    env.active_player = FACTION_AP
-    if env.action_mask("AP")[action]:
-        env.step(action)
-        offboard_after = sum(1 for u in env._units if u["faction"] == FACTION_AP and u["location"] == 255)
-        assert offboard_after < offboard_before, "Reinforcement event should bring unit on map"
-```
-
-**Acceptance:** tests pass; all 66 existing tests pass; `play.py` and
-`eval/tournament.py` import without error.
-
----
-
-### Task 7.7 — End-to-end self-play smoke test
-
-**Why this matters:** `train_selfplay.py` hasn't been exercised since the
-JaxGameState changes (war_status split, discard, reinf, SR). A quick
-cold-start test (no BC checkpoint) catches any integration breakage before
-waiting for cluster BC results.
-
-**File to create:** `tests/test_selfplay_smoke.py`
-
-```python
-"""
-Cold-start self-play smoke test: run 1 iteration with n_actors=2, batch=16.
-Does not require a BC checkpoint — starts from random weights.
-Passes if the loss is a finite number and a checkpoint file is written.
-"""
-import os, sys, tempfile, pytest
-import jax, jax.numpy as jnp
-
-
-def test_selfplay_smoke(tmp_path):
-    """One iteration of the self-play loop should complete without crash."""
-    sys.argv = [
-        "train_selfplay.py",
-        "--n-actors", "2",
-        "--buffer-capacity", "512",
-        "--batch-size", "16",
-        "--iterations", "1",
-        "--checkpoint-dir", str(tmp_path),
-    ]
-    # Import and call the main entry-point
-    import importlib.util, pathlib
-    spec = importlib.util.spec_from_file_location(
-        "train_selfplay", pathlib.Path("train_selfplay.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)   # runs top-level code; main() if present
-    if hasattr(mod, "main"):
-        mod.main()
-    # At minimum the file should be importable with no crash
-```
-
-If `train_selfplay.py` has no `main()` guard, add one:
-```python
-if __name__ == "__main__":
-    main()
-```
-and expose `main()` as a callable.
-
-Then run:
-```bash
-python train_selfplay.py --n-actors 2 --buffer-capacity 512 --batch-size 16 --iterations 1
-```
-
-If it runs cleanly, mark PASSED and note the output in `gpt2claude.md`.
-If it crashes, fix the integration bug (do NOT rewrite the file — find the minimal fix).
-
-**Acceptance:** train_selfplay.py runs 1 iteration without exception;
-loss printed to stdout is a finite float; all 66 existing tests still pass.
-
----
-
-### Task 7.8 — CARD_VP_DELTA: direct VP adjustments from event cards (lower priority)
-
-**Defer until after 7.6 + 7.7.** Needs `bonus_vp` field added to `JaxGameState`
-(schema change), which requires updating `tests/test_vp_tracking.py` and
-all direct `JaxGameState(...)` constructors.
-
-The 8 cards with clear immediate VP effects are:
-- Reichstag Truce (CP): `delta = -1` (helps CP)
-- Rape of Belgium (AP): `delta = +1` (helps AP)
-- Italy (AP): `delta = +1` per turn if unprovoked (complex — skip for now)
-- Blockade (AP): `delta = +1` per winter turn (complex — skip for now)
-
-Simple approach when implementing: add `bonus_vp: jnp.ndarray  # () int8` to
-`JaxGameState`, init to 0, terminal check uses `state.vp + state.bonus_vp`,
-and add `CARD_VP_DELTA` static array with ±1 for the simple cards. See this
-entry again when 7.6+7.7 are done.
-
----
-
-## Backlog summary
-
-| Task | File | Status | Priority |
+| Card | Faction | Event text (simplified) | Our delta |
 |---|---|---|---|
-| 7.1 Card re-deal | jax_env.py | ✅ DONE | — |
-| 7.2 War status advancement | jax_env.py | ✅ DONE | — |
-| 7.3 Discard fix | jax_env.py | ✅ DONE | — |
-| 7.4 Reinforcement events | jax_env.py | ✅ DONE | — |
-| 7.5 SR subtype | jax_env.py | ✅ DONE | — |
-| **7.6** pog_env.py alignment | pog_env.py | ← DO FIRST | High |
-| **7.7** Self-play smoke test | train_selfplay.py | After 7.6 | High |
-| 7.8 CARD_VP_DELTA | jax_env.py | After 7.7 | Low |
+| Reichstag Truce | CP | "Add 1 VP" | **−1** (CP winning = negative in our convention) |
 
-Implement in order. Update `gpt2claude.md` after each task.
+All other VP-related cards have per-turn accumulation, prerequisites, or side-
+effects that make them too complex for this phase. Delta = 0 for them.
+
+No `JaxGameState` schema change is needed. Apply delta directly to `state.vp`
+inside `do_event`; it persists until the next territorial `_recompute_vp` call.
+
+### Step 1 — Add `card_vp_delta` to `_load_static_tables()`
+
+In `_load_static_tables()`, add alongside the other `card_*` initialisations
+(near line 128):
+
+```python
+card_vp_delta = []
+```
+
+Inside the `if sid not in seen_cards:` block (near line 142), after the
+`card_reinf_count.append(...)` line:
+
+```python
+name_lower = entry["name"].lower()
+# Only Reichstag Truce has a clear, unconditional, one-time VP adjustment.
+# CP card "Add 1 VP" → positive VP goes to CP → delta = -1 in our convention
+# (our convention: positive vp = AP winning, negative = CP winning)
+if "reichstag truce" in name_lower:
+    card_vp_delta.append(-1)
+else:
+    card_vp_delta.append(0)
+```
+
+Add to the `return` dict:
+
+```python
+"card_vp_delta": np.array(card_vp_delta, dtype=np.int8),
+```
+
+### Step 2 — Add module-level constant
+
+After `CARD_REINF_COUNT` (around line 203):
+
+```python
+CARD_VP_DELTA = jnp.asarray(_STATIC["card_vp_delta"], dtype=jnp.int8)
+```
+
+### Step 3 — Apply delta in `do_event`
+
+Current `do_event` (lines 641–653):
+
+```python
+def do_event(s):
+    card_idx = (action - ACT_EVENT_START).astype(jnp.int16)
+    clamped = jnp.clip(card_idx, 0, CARD_REMOVE_AFTER_EVENT.shape[0] - 1)
+    permanent = CARD_REMOVE_AFTER_EVENT[clamped]
+    s = _remove_active_card(s, card_idx, permanent)
+    n_reinf = CARD_REINF_COUNT[clamped].astype(jnp.int8)
+    s = jax.lax.cond(
+        n_reinf > 0,
+        lambda st: _bring_units_on_map(st, st.active_player, n_reinf),
+        lambda st: st,
+        s,
+    )
+    return s
+```
+
+Add the VP delta after the reinforcement block:
+
+```python
+def do_event(s):
+    card_idx = (action - ACT_EVENT_START).astype(jnp.int16)
+    clamped = jnp.clip(card_idx, 0, CARD_REMOVE_AFTER_EVENT.shape[0] - 1)
+    permanent = CARD_REMOVE_AFTER_EVENT[clamped]
+    s = _remove_active_card(s, card_idx, permanent)
+    n_reinf = CARD_REINF_COUNT[clamped].astype(jnp.int8)
+    s = jax.lax.cond(
+        n_reinf > 0,
+        lambda st: _bring_units_on_map(st, st.active_player, n_reinf),
+        lambda st: st,
+        s,
+    )
+    # VP delta (one-time; persists until next territorial _recompute_vp)
+    delta = CARD_VP_DELTA[clamped].astype(jnp.int8)
+    s = s._replace(vp=jnp.clip(s.vp + delta, -127, 127).astype(jnp.int8))
+    return s
+```
+
+### Step 4 — Test: `tests/test_card_vp_delta.py`
+
+```python
+import jax, jax.numpy as jnp
+from src.env.jax_env import (
+    ACT_EVENT_START, CARD_FACTION, CARD_VP_DELTA,
+    FACTION_CP, jax_reset, jax_step,
+)
+
+
+def _find_reichstag() -> int:
+    """Return the global card index for Reichstag Truce."""
+    for i in range(CARD_VP_DELTA.shape[0]):
+        if int(CARD_VP_DELTA[i]) == -1:
+            return i
+    raise RuntimeError("Reichstag Truce not found in CARD_VP_DELTA")
+
+
+def test_reichstag_truce_decrements_vp():
+    card_idx = _find_reichstag()
+    assert int(CARD_FACTION[card_idx]) == FACTION_CP, "Reichstag Truce must be CP"
+
+    state = jax_reset(jax.random.PRNGKey(0))
+    vp_before = int(state.vp)
+    state = state._replace(
+        active_player=jnp.asarray(FACTION_CP, dtype=jnp.int8),
+        cp_hand=jnp.asarray([card_idx, 255, 255, 255, 255, 255, 255], dtype=jnp.int16),
+    )
+    action = jnp.asarray(ACT_EVENT_START + card_idx, dtype=jnp.int32)
+    new_state, _, _ = jax_step(state, action)
+    assert int(new_state.vp) == vp_before - 1, (
+        f"Reichstag Truce should decrement vp by 1: before={vp_before}, after={int(new_state.vp)}"
+    )
+
+
+def test_card_vp_delta_array_has_expected_nonzero():
+    nonzero = int(jnp.sum(CARD_VP_DELTA != 0))
+    assert nonzero >= 1, "At least Reichstag Truce should have a nonzero delta"
+```
+
+### Acceptance criteria
+
+- `tests/test_card_vp_delta.py` (2 tests) passes ✓
+- All 70 existing tests pass ✓
+- `jax.jit(jax_step)` compiles ✓
+- `CARD_VP_DELTA` is all-zeros except Reichstag Truce (delta=−1) ✓
+
+**Do not touch** anything outside `src/env/jax_env.py` and the new test file.
+
+---
+
+## After Task 7.8: project is engineering-complete
+
+The simulation is done. The pipeline is verified. What's left is data and training:
+
+### Waiting on: BC checkpoint from cluster
+
+When `checkpoints/bc/epoch_010.pkl` arrives:
+
+```bash
+# On cluster (256 actors, H200):
+python train_selfplay.py \
+  --bc-checkpoint checkpoints/bc/epoch_010.pkl \
+  --n-actors 256 --buffer-capacity 500000 \
+  --batch-size 2048 --iterations 500
+
+# On local RTX 5060 (16 actors):
+python train_selfplay.py \
+  --bc-checkpoint checkpoints/bc/epoch_010.pkl \
+  --n-actors 16 --buffer-capacity 50000 \
+  --batch-size 256 --iterations 100
+```
+
+### Waiting on: more training data (user action required)
+
+```bash
+# Scrape more expert games from RTT server:
+python scrape_rtt_expert.py
+# Then parse into training records:
+python src/data/rtt_parser.py data/rtt_games/ --output data/training/expert_games.jsonl
+# Target: 2000+ records (currently ~195 — BC will overfit badly at 195)
+```
+
+### After self-play training: evaluate
+
+```bash
+python eval/tournament.py checkpoints/rl/ --include-random --games 100
+# Target Elo milestones: +200 (BC-level), +400 (beginner human)
+```
+
+---
+
+## Complete backlog status
+
+| Task | Description | Status |
+|---|---|---|
+| 7.1 | Card re-deal | ✅ DONE |
+| 7.2 | War status advancement | ✅ DONE |
+| 7.3 | Discard fix | ✅ DONE |
+| 7.4 | Reinforcement events | ✅ DONE |
+| 7.5 | SR subtype | ✅ DONE |
+| 7.6 | pog_env.py alignment | ✅ DONE |
+| 7.7 | Self-play smoke test | ✅ DONE |
+| **7.8** | CARD_VP_DELTA (Reichstag Truce) | **← DO NOW** |
+| — | BC checkpoint (cluster) | ⏳ Waiting |
+| — | More training data | ⏳ User scrapes |
+| — | Self-play training | ⏳ Blocked on BC |
+| — | Elo evaluation | ⏳ Blocked on self-play |
