@@ -16,8 +16,8 @@ Phase 3 — RL Self-Play      ████████████████�
 Phase 4 — Evaluation        ████████████████████  DONE (eval/tournament.py)
 Phase 5 — Human Interface   ████████████████████  DONE (play.py)
 Phase 6 — Board Init        ████████████████████  DONE (starting_positions.py, VP tracking, terminal reward)
-Phase 7 — Card Mechanics    ██████████████████░░  7.1–7.7 DONE; 7.8 assigned (CARD_VP_DELTA)
-Phase 8 — RL Training       ░░░░░░░░░░░░░░░░░░░░  Blocked on BC checkpoint + more data
+Phase 7 — Card Mechanics    ████████████████████  7.1–7.8 ALL DONE — simulation complete
+Phase 8 — RL Training       ░░░░░░░░░░░░░░░░░░░░  Blocked on BC checkpoint (cluster running)
 ```
 
 ---
@@ -317,15 +317,10 @@ reinforcement events bring units on map; SR brings unit to source space.
 Cold-start (no BC checkpoint): `loss=5.3199`, `policy=0.6384`, `value=2.9483` — finite.
 Checkpoint written. 70/70 tests pass.
 
-### Task 7.8 — CARD_VP_DELTA: VP-adjusting event cards  ← CURRENT TASK FOR GPT
+### Task 7.8 — CARD_VP_DELTA: VP-adjusting event cards  ✅ DONE
 
-**Problem:** Cards that give an immediate VP adjustment are still no-ops in `do_event`.
-Reichstag Truce (CP) is the only clear unconditional case: "Add 1 VP" → delta = −1
-in our convention (positive = AP winning). All other VP cards have per-turn
-accumulation or prerequisites — leave them at delta = 0 for now.
-
-**Fix (no schema change):** Add `CARD_VP_DELTA` static array; apply `state.vp + delta`
-at end of `do_event`. See `claude2gpt.md` for exact code and test.
+Reichstag Truce (CP): delta = −1 applied in `do_event`. All others = 0.
+`tests/test_card_vp_delta.py` passes. 72/72 total tests pass.
 
 ### Task 7.6 (trench construction) — PERMANENTLY DEFERRED
 
